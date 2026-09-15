@@ -19,10 +19,25 @@ export type Form = {
   backend_kwargs: string;
   gpu_mem: number;
   batch: number;
+  align_batch: number;
   max_tokens: number;
   sample_rate: number;
   channels: number;
   normalize: boolean;
+};
+
+export type OptimizationStatus = {
+  optimized: boolean;
+  batch?: number;
+  applied_at?: string | null;
+  device?: string | null;
+  speed?: number;
+  speed_source?: "real" | "benchmark";
+  real_jobs?: number;
+  peak_vram_mb?: number;
+  minutes_per_audio_hour?: number;
+  speedup_vs_smallest?: number;
+  gpu_total_mb?: number | null;
 };
 
 export type Config = {
@@ -35,6 +50,7 @@ export type Config = {
   dtypes: string[];
   backends: string[];
   media_extensions: string[];
+  optimization: OptimizationStatus;
 };
 
 export type I18n = {
@@ -63,14 +79,48 @@ export type Progress = {
   estimated_from_history: boolean;
 };
 
+export type Trial = {
+  batch: number;
+  status: "ok" | "too_slow_gain" | "exceeds_vram" | "oom" | "skipped" | "error";
+  speed: number | null;
+  peak_vram_mb: number | null;
+  note: string | null;
+};
+
+export type OptimizerSnapshot = {
+  stage: "loading" | "warmup" | "trial" | "saving" | "done";
+  current_batch: number | null;
+  done: number;
+  total: number;
+  fraction: number;
+  elapsed_seconds: number;
+  trials: Trial[];
+};
+
+export type Optimization = {
+  best_batch: number;
+  previous_batch: number;
+  trials: Trial[];
+  device: string;
+  env_path: string | null;
+};
+
 export type TaskStatus = {
   id: string;
-  state: "queued" | "running" | "done" | "error";
+  kind?: "transcribe" | "optimize";
+  optimizer?: OptimizerSnapshot | null;
+  optimization?: Optimization;
+  defaults?: Form;
+  optimization_status?: OptimizationStatus;
+  state: "queued" | "running" | "done" | "error" | "cancelled";
   status: string | null;
   error: string | null;
   queue_position: number;
   elapsed: number;
   progress: Progress | null;
+  cancel_requested?: boolean;
+  completed?: boolean;
+  processed_seconds?: number | null;
   audio_duration?: number;
   rtf?: number | null;
   preview?: string;
@@ -123,6 +173,9 @@ export const api = {
   i18n: () => request<I18n>("/api/i18n"),
   task: (id: string) => request<TaskStatus>(`/api/tasks/${id}`),
   start: (upload_id: string, form: Form) => request<{ task_id: string }>("/api/tasks", post({ upload_id, form })),
+  cancel: (id: string) => request<TaskStatus>(`/api/tasks/${id}/cancel`, { method: "POST" }),
+  applyOptimization: (id: string) => request<TaskStatus>(`/api/tasks/${id}/apply`, { method: "POST" }),
+  optimize: (form: Form) => request<{ task_id: string }>("/api/optimize", post({ form })),
   rename: (id: string, names: Record<string, string>) => request<TaskStatus>(`/api/tasks/${id}/speakers`, post({ names })),
   unload: () => request<{ model_loaded: boolean }>("/api/model/unload", { method: "POST" }),
 

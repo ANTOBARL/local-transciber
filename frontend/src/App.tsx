@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Braces,
+  Captions,
+  FileType,
+  Hash,
+  Subtitles,
   AudioLines,
   CheckCircle2,
   ChevronDown,
   Clock,
   Download,
-  FileAudio,
   FileText,
   FolderOpen,
   Gauge,
@@ -15,6 +19,7 @@ import {
   Loader2,
   PowerOff,
   Settings2,
+  Square,
   Timer,
   Upload,
   UserPen,
@@ -24,13 +29,24 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import { ApiError, api, clock, type AudioInfo, type Config, type Form, type I18n, type TaskStatus } from "./api";
+import { ApiError, api, clock, type Config, type Form, type I18n, type TaskStatus } from "./api";
+import { OptimizePanel } from "./OptimizePanel";
 import { ProgressBar } from "./progress";
+import { QueueList } from "./QueueList";
+import { isActive, itemStatus, useQueue } from "./queue";
 
-const EXPORT_LABELS: Record<string, string> = { json: "JSON", txt: "TXT", markdown: "Markdown", srt: "SRT", vtt: "VTT" };
+const FORMATS: Record<string, { label: string; icon: LucideIcon }> = {
+  json: { label: "JSON", icon: Braces },
+  txt: { label: "TXT", icon: FileText },
+  markdown: { label: "Markdown", icon: Hash },
+  srt: { label: "SRT", icon: Captions },
+  vtt: { label: "VTT", icon: Subtitles },
+  docx: { label: "Word", icon: FileType },
+};
+const formatLabel = (fmt: string) => FORMATS[fmt]?.label ?? fmt;
 const LANG_KEY = "scriba_ui_lang";
 
-type SettingsTab = "output" | "model" | "performance";
+type SettingsTab = "output" | "model" | "performance" | "optimize";
 type ResultTab = "transcript" | "files" | "speakers";
 type Translate = (key: string) => string;
 
@@ -137,76 +153,52 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
     [t],
   );
 
-  // ------------------------------------------------------------------ upload
-  const [upload, setUpload] = useState<{ id: string; info: AudioInfo } | null>(null);
-  const [uploadPct, setUploadPct] = useState<number | null>(null);
+  // ------------------------------------------------------------------ queue of files (processed one after another)
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const contextInput = useRef<HTMLInputElement>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
 
-  const handleFile = async (file: File | undefined) => {
-    if (!file) return;
-    setUpload(null);
+  const queue = useQueue({
+    onUploadError: (e) => reportError("error_upload", e),
+    onStartError: (e) => reportError("error_start", e),
+    onJobError: (item) =>
+      setError({ kind: "error", message: `${t("error_job")} · ${item.name}`, detail: item.task?.error ?? undefined }),
+    onTaskLost: () => setError({ kind: "error", message: t("error_task_lost") }),
+  });
+  const { connectionLost } = queue;
+  const selected = queue.items.find((it) => it.id === selectedId) ?? null;
+  const task: TaskStatus | null = selected?.task ?? null;
+  const taskId = selected?.taskId ?? null;
+  const running = queue.items.some(isActive);
+  const uploading = queue.items.some((it) => itemStatus(it) === "uploading");
+  const readyCount = queue.items.filter((it) => itemStatus(it) === "ready").length;
+
+  const handleFiles = (files: FileList | null | undefined) => {
+    if (!files?.length) return;
     setError(null);
-    setUploadPct(0);
-    try {
-      const res = await api.upload(file, setUploadPct);
-      setUpload({ id: res.upload_id, info: res.info });
-    } catch (e) {
-      reportError("error_upload", e);
-    } finally {
-      setUploadPct(null);
-    }
+    const ids = queue.addFiles(files);
+    if (!selectedId) setSelectedId(ids[0]);
   };
 
   const loadContext = async (file: File | undefined) => {
     if (file) set("context", (await file.text()).trim());
   };
 
-  // ------------------------------------------------------------------ task polling (resilient)
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const [task, setTask] = useState<TaskStatus | null>(null);
-  const [connectionLost, setConnectionLost] = useState(false);
-  const [tick, setTick] = useState(0);
-  const running = task?.state === "queued" || task?.state === "running";
-
+  // Follow the queue: when the job being watched finishes, show the next one that starts.
+  const runningId = queue.items.find((it) => itemStatus(it) === "running")?.id ?? null;
+  const previousRunning = useRef<string | null>(null);
   useEffect(() => {
-    if (!taskId) return;
-    let stop = false;
-    let failures = 0;
-    let timer: ReturnType<typeof setTimeout>;
-
-    const poll = async () => {
-      try {
-        const s = await api.task(taskId);
-        if (stop) return;
-        failures = 0;
-        setConnectionLost(false);
-        setTask(s);
-        if (s.state === "error") setError({ kind: "error", message: t("error_job"), detail: s.error ?? undefined });
-        if (s.state === "done" || s.state === "error") return;
-      } catch (e) {
-        if (stop) return;
-        const err = e as ApiError;
-        if (err instanceof ApiError && err.status === 404) {
-          // The server answers but no longer knows the task: it was restarted.
-          setConnectionLost(false);
-          setTask((prev) => (prev ? { ...prev, state: "error", error: t("error_task_lost"), progress: null } : prev));
-          setError({ kind: "error", message: t("error_task_lost") });
-          return;
-        }
-        failures += 1;
-        setConnectionLost(true);
+    if (runningId && runningId !== selectedId) {
+      const watching = selected ? itemStatus(selected) : null;
+      if (!selected || selectedId === previousRunning.current || watching === "queued" || watching === "ready") {
+        setSelectedId(runningId);
       }
-      // Keep retrying while disconnected, backing off up to 5 s.
-      timer = setTimeout(poll, failures ? Math.min(5000, 1000 * (1 + failures)) : 1000);
-    };
-    poll();
-    return () => {
-      stop = true;
-      clearTimeout(timer);
-    };
-  }, [taskId, t]);
+    }
+    previousRunning.current = runningId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningId]);
 
   useEffect(() => {
     if (!running) return;
@@ -214,39 +206,40 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
     return () => clearInterval(id);
   }, [running]);
 
-  const startedAt = useRef<number>(0);
   const transcribe = async () => {
-    if (!upload) {
+    if (!readyCount) {
       setError({ kind: "error", message: t("upload_first") });
       return;
     }
     setError(null);
-    setTask(null);
     setResultTab("transcript");
-    try {
-      startedAt.current = Date.now();
-      const { task_id } = await api.start(upload.id, form);
-      setTaskId(task_id);
-    } catch (e) {
-      reportError("error_start", e);
-    }
+    const started = await queue.startAll(form);
+    if (started.length && (!selected || !isActive(selected))) setSelectedId(started[0]);
   };
 
   const status = useMemo(() => {
-    if (connectionLost) return { text: t("error_connection"), state: "warn" as const };
+    if (connectionLost) return { text: t("error_connection"), state: "offline" as const };
+    if (selected?.lost) return { text: t("error_task_lost"), state: "error" as const };
     if (!task) return { text: t("ready"), state: "idle" as const };
     if (task.state === "queued")
       return { text: `${t("queued")}${task.queue_position > 1 ? ` (#${task.queue_position})` : ""}`, state: "running" as const };
+    if (task.state === "running" && task.cancel_requested) return { text: t("stopping"), state: "warn-running" as const };
     if (task.state === "running") return { text: t(`status_${task.status ?? "preprocessing"}`), state: "running" as const };
     if (task.state === "error") return { text: t("failed"), state: "error" as const };
+    if (task.state === "cancelled") return { text: t("failed"), state: "warn" as const };
+    if (task.completed === false)
+      return {
+        text: t("stopped").replace("{processed}", clock(task.processed_seconds)).replace("{duration}", clock(task.audio_duration)),
+        state: "warn" as const,
+      };
     return { text: t("done"), state: "done" as const };
-  }, [connectionLost, task, t]);
+  }, [connectionLost, task, selected?.lost, t]);
 
   void tick; // re-render every second while running
   const liveElapsed = !task
     ? undefined
     : task.state === "running"
-      ? Math.max(task.elapsed, (Date.now() - startedAt.current) / 1000)
+      ? Math.max(task.elapsed, (Date.now() - (selected?.startedAt ?? Date.now())) / 1000)
       : task.elapsed;
 
   // ------------------------------------------------------------------ results
@@ -258,10 +251,10 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
   }, [task?.state, task?.speaker_names]);
 
   const applyNames = async () => {
-    if (!taskId) return;
+    if (!taskId || !selected) return;
     setRenameMsg(null);
     try {
-      setTask(await api.rename(taskId, names));
+      queue.update(selected.id, { task: await api.rename(taskId, names) });
       setRenameMsg(t("names_applied"));
     } catch (e) {
       reportError("rename_failed", e);
@@ -272,6 +265,11 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("output");
   const [unloadMsg, setUnloadMsg] = useState<string | null>(null);
+  // The optimizer writes the tuned batch size to .env; reflect it in the current form too.
+  const applyTuned = useCallback(
+    (defaults: Form) => setForm((f) => (f ? { ...f, batch: defaults.batch } : f)),
+    [setForm],
+  );
   const languageNames = i18n.language_names[lang] ?? {};
 
   const numberField = (key: keyof Form, label: string, step = 1, min?: number, max?: number) => (
@@ -300,7 +298,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
     </label>
   );
 
-  const info = upload?.info;
+  const info = selected?.info;
 
   return (
     <div className="app">
@@ -313,7 +311,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
           <div className="title">
             <h1>{config.app}</h1>
             <p>
-              {t("subtitle")} · v{config.version}
+              {t("subtitle")}
             </p>
           </div>
         </div>
@@ -353,55 +351,54 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
       <main className="columns">
         {/* ---------------------------------------------------------- left column */}
         <section className="col col-left">
-          <div
-            className={`card dropzone ${dragOver ? "over" : ""}`}
-            onClick={() => fileInput.current?.click()}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragOver(false);
-              handleFile(e.dataTransfer.files[0]);
-            }}
-          >
-            <input
-              ref={fileInput}
-              type="file"
-              hidden
-              accept={config.media_extensions.join(",")}
-              onChange={(e) => handleFile(e.target.files?.[0])}
-            />
-            <div className="dropzone-body">
-              {uploadPct !== null ? (
-                <>
-                  <Loader2 className="spin muted" />
-                  <div className="progress">
-                    <div style={{ width: `${uploadPct}%` }} />
-                  </div>
-                  <span className="muted">{uploadPct}%</span>
-                </>
-              ) : info ? (
-                <div className="file-info">
-                  <FileAudio className="file-icon" />
-                  <div>
-                    <strong>{info.filename}</strong>
-                    <span>
-                      {(info.size_bytes / 1024 ** 2).toFixed(1)} MB · {clock(info.duration)} · {info.codec ?? "?"} ·{" "}
-                      {info.sample_rate ?? "?"} Hz · {info.channels ?? "?"} ch
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <Upload className="drop-icon" />
-                  <span className="drop-title">{t("audio_file")}</span>
+          <div className="card queue-card">
+            <div
+              className={`dropzone ${dragOver ? "over" : ""} ${queue.items.length ? "compact" : ""}`}
+              onClick={() => fileInput.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                handleFiles(e.dataTransfer.files);
+              }}
+            >
+              <input
+                ref={fileInput}
+                type="file"
+                hidden
+                multiple
+                accept={config.media_extensions.join(",")}
+                onChange={(e) => {
+                  handleFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <div className="dropzone-body">
+                <Upload className="drop-icon" />
+                <span className="drop-title">{queue.items.length ? t("add_files") : t("audio_file")}</span>
+                {!queue.items.length && (
                   <span className="muted small">{config.media_extensions.slice(0, 8).join("  ")} …</span>
-                </>
-              )}
+                )}
+              </div>
             </div>
+
+            {queue.items.length > 0 && (
+              <QueueList
+                items={queue.items}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                onRemove={(id) => {
+                  queue.remove(id);
+                  if (id === selectedId) setSelectedId(null);
+                }}
+                onCancel={(id) => queue.cancel(id).catch((e) => reportError("failed", e))}
+                t={t}
+              />
+            )}
           </div>
 
           <div className="card stack">
@@ -461,25 +458,34 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
               <span className="label">{t("formats")}</span>
               <div className="chips">
                 {config.export_formats.map((fmt) => (
-                  <label key={fmt} className={`chip ${form.formats.includes(fmt) ? "on" : ""}`}>
-                    <input
-                      type="checkbox"
-                      checked={form.formats.includes(fmt)}
-                      onChange={(e) =>
-                        set("formats", e.target.checked ? [...form.formats, fmt] : form.formats.filter((f) => f !== fmt))
-                      }
-                    />
-                    {EXPORT_LABELS[fmt] ?? fmt}
-                  </label>
+                  <FormatChip
+                    key={fmt}
+                    fmt={fmt}
+                    checked={form.formats.includes(fmt)}
+                    onChange={(on) => set("formats", on ? [...form.formats, fmt] : form.formats.filter((f) => f !== fmt))}
+                  />
                 ))}
               </div>
             </div>
           </div>
 
-          <button className="btn primary lg" onClick={transcribe} disabled={running || uploadPct !== null}>
-            {running ? <Loader2 className="spin" size={20} /> : <AudioLines size={20} />}
-            {t("transcribe")}
-          </button>
+          <div className="run-row">
+            <button className="btn primary lg" onClick={transcribe} disabled={!readyCount || uploading}>
+              {running ? <Loader2 className="spin" size={20} /> : <AudioLines size={20} />}
+              {t("transcribe")}
+              {readyCount > 1 ? ` (${readyCount})` : ""}
+            </button>
+            {selected && isActive(selected) && (
+              <button
+                className="btn danger lg"
+                disabled={task?.cancel_requested}
+                onClick={() => queue.cancel(selected.id).catch((e) => reportError("failed", e))}
+              >
+                <Square size={18} />
+                {t("stop")}
+              </button>
+            )}
+          </div>
 
           <div className={`card accordion ${settingsOpen ? "open" : ""}`}>
             <button className="accordion-head" onClick={() => setSettingsOpen((o) => !o)} aria-expanded={settingsOpen}>
@@ -491,7 +497,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
             {settingsOpen && (
               <div className="accordion-body">
                 <div className="tabs">
-                  {(["output", "model", "performance"] as SettingsTab[]).map((tab) => (
+                  {(["output", "model", "performance", "optimize"] as SettingsTab[]).map((tab) => (
                     <button key={tab} className={settingsTab === tab ? "active" : ""} onClick={() => setSettingsTab(tab)}>
                       {t(`tab_${tab}`)}
                     </button>
@@ -555,6 +561,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
                     </div>
                   </div>
                 )}
+                {settingsTab === "optimize" && <OptimizePanel form={form} t={t} onError={reportError} onApplied={applyTuned} initialStatus={config.optimization} />}
                 {settingsTab === "performance" && (
                   <div className="stack">
                     <label className="field">
@@ -573,6 +580,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
                     <div className="row two">
                       {numberField("batch", t("batch"), 1, -1)}
                       {numberField("max_tokens", t("max_tokens"), 1, 1)}
+                      {numberField("align_batch", t("align_batch"), 1, 0)}
                     </div>
                     <div className="row two">
                       {numberField("sample_rate", t("sample_rate"), 1, 8000)}
@@ -606,7 +614,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
               <AlertTriangle className="alert-icon" />
               <div className="alert-body">
                 {task.warnings.map((w) => (
-                  <div key={w}>{w}</div>
+                  <div key={w}>{w.startsWith("warn:") ? t(w.slice(5)) : w}</div>
                 ))}
               </div>
             </div>
@@ -638,7 +646,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
                     {task.files.map((f) => (
                       <li key={f.name}>
                         <a href={f.url} download={f.name}>
-                          <span className="badge">{EXPORT_LABELS[f.format] ?? f.format}</span>
+                          <span className="badge"><FormatIcon fmt={f.format} size={14} /> {formatLabel(f.format)}</span>
                           <span className="grow">{f.name}</span>
                           <Download size={16} className="muted" />
                         </a>
@@ -749,7 +757,9 @@ function StatusIcon({ state }: { state: string }) {
   if (state === "running") return <Loader2 className="spin status-icon" />;
   if (state === "done") return <CheckCircle2 className="status-icon" />;
   if (state === "error") return <XCircle className="status-icon" />;
-  if (state === "warn") return <WifiOff className="status-icon" />;
+  if (state === "offline") return <WifiOff className="status-icon" />;
+  if (state === "warn-running") return <Loader2 className="spin status-icon" />;
+  if (state === "warn") return <AlertTriangle className="status-icon" />;
   return <span className="dot" />;
 }
 
@@ -766,6 +776,21 @@ function ToggleCard(props: { icon: LucideIcon; title: string; hint: string; chec
       </span>
       <input type="checkbox" role="switch" checked={props.checked} onChange={(e) => props.onChange(e.target.checked)} />
       <span className="switch" aria-hidden />
+    </label>
+  );
+}
+
+function FormatIcon({ fmt, size = 16 }: { fmt: string; size?: number }) {
+  const Icon = FORMATS[fmt]?.icon ?? FileText;
+  return <Icon size={size} aria-hidden />;
+}
+
+function FormatChip({ fmt, checked, onChange }: { fmt: string; checked: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className={`chip format-${fmt} ${checked ? "on" : ""}`}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <FormatIcon fmt={fmt} />
+      {formatLabel(fmt)}
     </label>
   );
 }
