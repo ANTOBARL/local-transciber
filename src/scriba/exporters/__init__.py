@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from scriba.exporters.docx_exporter import export_docx
 from scriba.exporters.json_exporter import export_json, load_transcript
 from scriba.exporters.markdown_exporter import export_markdown
 from scriba.exporters.srt_exporter import export_srt
@@ -20,6 +21,7 @@ EXPORTERS: dict[str, tuple[str, Exporter]] = {
     "markdown": ("transcript.md", export_markdown),
     "srt": ("transcript.srt", export_srt),
     "vtt": ("transcript.vtt", export_vtt),
+    "docx": ("transcript.docx", export_docx),
 }
 
 TIMED_FORMATS = {"srt", "vtt"}

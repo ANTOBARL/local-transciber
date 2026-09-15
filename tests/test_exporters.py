@@ -47,6 +47,20 @@ def test_txt_uses_speaker_names():
     assert "[00:00:08] SPEAKER_01\nPossiamo iniziare." in txt
 
 
+def test_docx_is_a_valid_word_document(tmp_path):
+    import zipfile
+    from xml.dom import minidom
+
+    t = make_transcript(speaker_names={"SPEAKER_00": "Luca"}, completed=False, processed_seconds=9.0)
+    files, _ = export_all(t, tmp_path, ["docx"])
+    with zipfile.ZipFile(files["docx"]) as zf:
+        assert {"[Content_Types].xml", "word/document.xml", "word/styles.xml", "_rels/.rels"} <= set(zf.namelist())
+        document = zf.read("word/document.xml").decode("utf-8")
+    minidom.parseString(document)  # well-formed XML
+    assert "Luca" in document and "Buongiorno a tutti." in document
+    assert "La trascrizione si è interrotta" in document
+
+
 def test_export_all_roundtrip_and_skip_timed(tmp_path):
     t = make_transcript()
     files, warnings = export_all(t, tmp_path, ["txt", "markdown", "srt", "vtt"])
