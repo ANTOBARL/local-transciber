@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from scriba import APP_NAME, __version__
-from scriba.config import ScribaSettings
+from scriba.config import ScribaSettings, SettingsProvider
 from scriba.errors import ScribaError
 from scriba.i18n import DEFAULT_LANG, UI_LANGUAGES, language_choices, t
 from scriba.languages import SUPPORTED_LANGUAGES
@@ -26,7 +26,7 @@ log = get_logger("ui")
 
 from scriba.webform import BACKEND_CHOICES, DTYPE_CHOICES, TranscriptionForm  # noqa: E402
 
-EXPORT_CHOICES = [("JSON", "json"), ("TXT", "txt"), ("Markdown", "markdown"), ("SRT", "srt"), ("VTT", "vtt")]
+EXPORT_CHOICES = [("JSON", "json"), ("TXT", "txt"), ("Markdown", "markdown"), ("SRT", "srt"), ("VTT", "vtt"), ("Word", "docx")]
 SYSTEM_FONTS = ["ui-sans-serif", "system-ui", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"]
 MONO_FONTS = ["ui-monospace", "Cascadia Code", "Consolas", "Menlo", "monospace"]
 
@@ -49,6 +49,24 @@ CSS = """
 .scriba-card > .styler, .scriba-card .form {background: transparent !important; border: 0 !important}
 #scriba-status-card {padding: .9rem 1rem !important}
 #scriba-upload {min-height: 0}
+.scriba-confirm {padding: .9rem 1rem !important; border-radius: 12px !important;
+  border: 1px solid rgba(34,197,94,.5) !important}
+.scriba-optimized {display: flex; flex-direction: column; gap: .1rem; padding: .8rem 1rem; border-radius: 12px;
+  background: rgba(34,197,94,.12); border: 1px solid rgba(34,197,94,.5); margin-bottom: .4rem}
+.scriba-optimized strong {font-size: 1.05rem; color: #22c55e}
+.scriba-optimized-detail {opacity: .75; font-size: .85rem; margin-bottom: .5rem}
+.scriba-tiles {display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem}
+.scriba-tile {display: flex; flex-direction: column; gap: .2rem; padding: .55rem .7rem; border-radius: 10px;
+  background: var(--background-fill-secondary)}
+.scriba-tile-label {font-size: .75rem; opacity: .7}
+.scriba-tile-value {font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums}
+.scriba-tile-value small {font-size: .75rem; font-weight: 500; opacity: .7; margin-left: .2rem}
+.scriba-meter {height: 6px; border-radius: 99px; background: var(--border-color-primary); overflow: hidden}
+.scriba-meter > div {height: 100%; background: var(--color-accent); border-radius: 99px}
+.scriba-facts {margin: .6rem 0 .2rem; padding-left: 1.1rem; font-size: .9rem}
+.scriba-footnote {font-size: .75rem; opacity: .6}
+@media (max-width: 560px) {.scriba-tiles {grid-template-columns: 1fr}}
+#scriba-apply {font-weight: 800; font-size: 1.1rem; min-height: 3.2rem; margin-top: .8rem}
 #scriba-transcribe {font-weight: 800; letter-spacing: .1em; font-size: 1.1rem; min-height: 3.2rem}
 #scriba-context-btn {align-self: flex-end; max-width: 13rem}
 .scriba-hint {opacity: .65; font-size: .9rem}
@@ -98,6 +116,10 @@ CSS = """
 .scriba-alert code {display: block; margin-top: .35rem; padding: .5rem .65rem; border-radius: 8px; white-space: pre-wrap;
   word-break: break-word; background: var(--background-fill-secondary)}
 .scriba-progress {margin-top: .7rem}
+.scriba-opt {width: 100%; border-collapse: collapse; margin-top: .8rem; font-variant-numeric: tabular-nums}
+.scriba-opt th {text-align: left; font-size: .8rem; opacity: .7; padding: .3rem .4rem}
+.scriba-opt td {padding: .35rem .4rem; border-top: 1px solid var(--border-color-primary)}
+.scriba-opt tr.best td {color: var(--color-accent); font-weight: 600}
 .scriba-progress-head {display: flex; justify-content: space-between; gap: 1rem; font-size: .9rem; margin-bottom: .35rem;
   flex-wrap: wrap}
 .scriba-progress-head span:last-child {opacity: .75}
@@ -145,17 +167,108 @@ def progress_html(snapshot: dict[str, Any] | None, lang: str) -> str:
         return ""
     from scriba.core.progress import format_eta
 
-    phase = t(lang, "progress_align" if snapshot["phase"] == "align" else "progress_asr")
-    done, total = snapshot["align"] if snapshot["phase"] == "align" else snapshot["asr"]
-    segments = f" · {done}/{total} {t(lang, 'progress_segments')}" if total else ""
+    aligning = snapshot["phase"] == "align"
+    asr_done, asr_total = snapshot["asr"]
+    align_done, align_total = snapshot["align"]
+
+    def phase(label: str, done: int, total: int, active: bool) -> str:
+        mark = "✓ " if total and done >= total else ""
+        text = f"{mark}{html.escape(label)} {done}/{total}" if total else html.escape(label)
+        return f"<b>{text}</b>" if active else f'<span style="opacity:.7">{text}</span>'
+
+    # Each phase keeps its own counter, so finishing ASR never looks like a reset.
+    parts = [phase(t(lang, "progress_asr"), asr_done, asr_total, not aligning)]
+    if aligning or align_total:
+        parts.append(phase(t(lang, "progress_align"), align_done, align_total or asr_total, aligning))
     pct = snapshot["percent"]
     return (
         '<div class="scriba-progress">'
-        f'<div class="scriba-progress-head"><span><b>{phase}</b> · {pct}%{segments}</span>'
+        f'<div class="scriba-progress-head"><span>{" · ".join(parts)} · {pct}%</span>'
         f'<span>{html.escape(format_eta(snapshot["eta_seconds"], lang))}</span></div>'
         f'<div class="scriba-bar"><div style="width:{snapshot["fraction"] * 100:.1f}%"></div></div>'
         "</div>"
     )
+
+
+def optimize_desc_md(lang: str) -> str:
+    return f"{t(lang, 'optimize_desc')} **{t(lang, 'optimize_duration')}**"
+
+
+def format_minutes(minutes: float) -> str:
+    """1 min 15 s, 4 min, 45 s (kept in sync with frontend/src/OptimizedInfographic.tsx)."""
+    total = round(minutes * 60)
+    if total < 60:
+        return f"{total} s"
+    m, s = divmod(total, 60)
+    return f"{m} min {s:02d} s" if m < 10 and s >= 5 else f"{round(total / 60)} min"
+
+
+def optimized_html(lang: str) -> str:
+    """Compact infographic shown once tuned parameters have been applied."""
+    from scriba.core.optimizer import optimization_status
+
+    status = optimization_status()
+    if not status["optimized"]:
+        return ""
+    details = " · ".join(x for x in (t(lang, "optimized_detail").format(batch=status["batch"]),
+                                     status.get("device"), status.get("applied_at")) if x)
+    head = (f'<div class="scriba-optimized"><strong>{html.escape(t(lang, "optimized_title"))}</strong>'
+            f'<span class="scriba-optimized-detail">{html.escape(details)}</span>')
+    if status.get("speed") is None:
+        return head + "</div>"
+
+    tiles = [
+        (t(lang, "info_speed"), f'{status["speed"]:.0f}<small>{html.escape(t(lang, "info_speed_unit"))}</small>', ""),
+        (t(lang, "info_hour"), f'≈ {format_minutes(status["minutes_per_audio_hour"])}', ""),
+    ]
+    if status.get("gpu_total_mb"):
+        pct = min(100.0, status["peak_vram_mb"] / status["gpu_total_mb"] * 100)
+        tiles.append((t(lang, "info_vram"),
+                      f'{status["peak_vram_mb"] / 1024:.1f}<small> / {status["gpu_total_mb"] / 1024:.0f} GB</small>',
+                      f'<div class="scriba-meter"><div style="width:{pct:.0f}%"></div></div>'))
+    tiles_html = "".join(
+        f'<div class="scriba-tile"><span class="scriba-tile-label">{html.escape(label)}</span>'
+        f'<span class="scriba-tile-value">{value}</span>{extra}</div>'
+        for label, value, extra in tiles
+    )
+    facts = [t(lang, "info_fact_long").format(time=format_minutes(status["minutes_per_audio_hour"] * 3))]
+    if (status.get("speedup_vs_smallest") or 0) > 1:
+        facts.append(t(lang, "info_fact_speedup").format(x=status["speedup_vs_smallest"]))
+    facts_html = "".join(f"<li>{html.escape(f)}</li>" for f in facts)
+    source = (t(lang, "info_source_real").format(n=status.get("real_jobs", 0)) if status.get("speed_source") == "real"
+              else t(lang, "info_source_benchmark"))
+    return (head + f'<div class="scriba-tiles">{tiles_html}</div><ul class="scriba-facts">{facts_html}</ul>'
+            f'<span class="scriba-footnote">{html.escape(source)} {html.escape(t(lang, "info_footnote"))}</span></div>')
+
+
+def optimizer_html(snapshot: dict[str, Any], lang: str, result: dict[str, Any] | None = None) -> str:
+    """Live progress and result table of the inference optimizer."""
+    stage = snapshot["stage"]
+    if result is None:
+        label = t(lang, f"optimize_stage_{stage}") if stage != "trial" else \
+            f"{t(lang, 'optimize_stage_trial')} {snapshot['current_batch']}"
+        head = (f'<div class="scriba-progress"><div class="scriba-progress-head"><span><b>{html.escape(label)}</b>'
+                f' · {snapshot["done"]}/{snapshot["total"]}</span><span>{format_clock(snapshot["elapsed_seconds"])}'
+                f'</span></div><div class="scriba-bar"><div style="width:{snapshot["fraction"] * 100:.0f}%"></div>'
+                f'</div></div>')
+    else:
+        msg = t(lang, "optimize_done").format(best=result["best_batch"], previous=result["previous_batch"])
+        head = f'<div class="scriba-status done"><span class="scriba-dot"></span><span>{html.escape(msg)}</span></div>'
+    rows = []
+    best = result["best_batch"] if result else None
+    for trial in (result["trials"] if result else snapshot["trials"]):
+        is_best = trial["batch"] == best
+        speed = f'{trial["speed"]:.1f}×' if trial["speed"] else "—"
+        vram = f'{trial["peak_vram_mb"]:,.0f} MB' if trial["peak_vram_mb"] is not None else "—"
+        outcome = t(lang, f'optimize_result_{trial["status"]}') + (f' · <b>{t(lang, "optimize_best")}</b>' if is_best else "")
+        rows.append(f'<tr{" class=best" if is_best else ""}><td>{trial["batch"]}</td><td>{speed}</td><td>{vram}</td>'
+                    f'<td>{outcome}</td></tr>')
+    table = ""
+    if rows:
+        table = (f'<table class="scriba-opt"><thead><tr><th>{t(lang, "optimize_col_batch")}</th>'
+                 f'<th>{t(lang, "optimize_col_speed")}</th><th>{t(lang, "optimize_col_vram")}</th>'
+                 f'<th>{t(lang, "optimize_col_result")}</th></tr></thead><tbody>{"".join(rows)}</tbody></table>')
+    return head + table
 
 
 def metrics_html(lang: str, elapsed: str = "—", duration: str = "—", rtf: str = "—") -> str:
@@ -217,11 +330,14 @@ def make_theme():
     )
 
 
-def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEFAULT_LANG):
+def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, default_lang: str = DEFAULT_LANG):
     import gradio as gr
 
     from scriba.core.pipeline import TranscriptionService, apply_speaker_names
 
+    # A provider re-reads .env on change, so optimizer results apply without a restart.
+    current = settings.get if isinstance(settings, SettingsProvider) else (lambda: settings)
+    base = current()
     service = service or TranscriptionService()
     lock = threading.Lock()
     a, asr, dia, ex = base.app, base.asr, base.diarization, base.export
@@ -234,7 +350,7 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
 
         # ---------------------------------------------------------------- top bar
         with gr.Row(elem_id="scriba-topbar"):
-            title = gr.Markdown(f"# {APP_NAME}\n{t(L, 'subtitle')} · v{__version__}", elem_id="scriba-title")
+            title = gr.Markdown(f"# {APP_NAME}\n{t(L, 'subtitle')}", elem_id="scriba-title")
             lang_radio = gr.Radio(
                 choices=[(label, code) for code, label in UI_LANGUAGES.items()], value=L,
                 show_label=False, container=False, elem_id="scriba-lang",
@@ -269,7 +385,10 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
                     formats = gr.CheckboxGroup(label=t(L, "formats"), choices=EXPORT_CHOICES,
                                                value=ex.enabled_formats())
 
-                run_btn = gr.Button(t(L, "transcribe"), variant="primary", size="lg", elem_id="scriba-transcribe")
+                with gr.Row():
+                    run_btn = gr.Button(t(L, "transcribe"), variant="primary", size="lg", elem_id="scriba-transcribe",
+                                        scale=4)
+                    stop_btn = gr.Button(t(L, "stop"), variant="stop", size="lg", scale=1)
 
                 with gr.Accordion(t(L, "settings"), open=False) as acc_settings:
                     with gr.Tabs():
@@ -300,11 +419,27 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
                                                   precision=0)
                                 max_tokens = gr.Number(label=t(L, "max_tokens"), value=asr.max_new_tokens,
                                                        precision=0)
+                                align_batch = gr.Number(label=t(L, "align_batch"), value=asr.align_batch_size,
+                                                        precision=0, minimum=0)
                             with gr.Row():
                                 sample_rate = gr.Number(label=t(L, "sample_rate"), value=base.audio.sample_rate,
                                                         precision=0)
                                 channels = gr.Number(label=t(L, "channels"), value=base.audio.channels, precision=0)
                             normalize = gr.Checkbox(label=t(L, "normalize"), value=base.audio.normalize)
+                        with gr.Tab(t(L, "tab_optimize")) as tab_optimize:
+                            optimized_box = gr.HTML(optimized_html(L))
+                            optimize_desc = gr.Markdown(optimize_desc_md(L), elem_classes="scriba-hint")
+                            optimize_btn = gr.Button(t(L, "optimize_btn"), variant="primary")
+                            with gr.Group(visible=False, elem_classes="scriba-confirm") as confirm_box:
+                                confirm_text = gr.Markdown(t(L, "optimize_confirm"))
+                                with gr.Row():
+                                    confirm_no = gr.Button(t(L, "no"), variant="secondary")
+                                    confirm_yes = gr.Button(t(L, "yes"), variant="primary")
+                            optimize_out = gr.HTML()
+                            optimize_state = gr.State(None)
+                            apply_btn = gr.Button(t(L, "optimize_apply"), variant="primary", size="lg", visible=False,
+                                                  elem_id="scriba-apply")
+                            apply_out = gr.HTML()
 
             # ------------------------------------------------------------ right: results
             with gr.Column(scale=6, min_width=380):
@@ -333,7 +468,7 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
         def relabel(lang: str) -> list[Any]:
             return [
                 lang,
-                f"# {APP_NAME}\n{t(lang, 'subtitle')} · v{__version__}",
+                f"# {APP_NAME}\n{t(lang, 'subtitle')}",
                 gr.File(label=t(lang, "audio_file")),
                 gr.Dropdown(label=t(lang, "language"), choices=language_choices(lang, SUPPORTED_LANGUAGES)),
                 gr.Textbox(label=t(lang, "context"), placeholder=t(lang, "context_placeholder")),
@@ -345,6 +480,7 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
                 gr.Number(label=t(lang, "max_speakers")),
                 gr.CheckboxGroup(label=t(lang, "formats")),
                 gr.Button(value=t(lang, "transcribe")),
+                gr.Button(value=t(lang, "stop")),
                 gr.Accordion(label=t(lang, "settings")),
                 gr.Tab(label=t(lang, "tab_output")),
                 gr.Textbox(label=t(lang, "output_dir")),
@@ -363,9 +499,14 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
                 gr.Slider(label=t(lang, "gpu_mem")),
                 gr.Number(label=t(lang, "batch")),
                 gr.Number(label=t(lang, "max_tokens")),
+                gr.Number(label=t(lang, "align_batch")),
                 gr.Number(label=t(lang, "sample_rate")),
                 gr.Number(label=t(lang, "channels")),
                 gr.Checkbox(label=t(lang, "normalize")),
+                gr.Tab(label=t(lang, "tab_optimize")),
+                optimize_desc_md(lang),
+                gr.Button(value=t(lang, "optimize_btn")),
+                gr.Button(value=t(lang, "optimize_apply")),
                 gr.Tab(label=t(lang, "tab_transcript")),
                 gr.Textbox(placeholder=t(lang, "preview_empty")),
                 gr.Tab(label=t(lang, "tab_files")),
@@ -375,14 +516,19 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
                 t(lang, "speakers_empty"),
                 gr.Dataframe(headers=[t(lang, "speaker_col"), t(lang, "name_col")]),
                 gr.Button(value=t(lang, "apply_names")),
+                t(lang, "optimize_confirm"),
+                gr.Button(value=t(lang, "no")),
+                gr.Button(value=t(lang, "yes")),
+                optimized_html(lang),
             ]
 
         relabel_outputs = [
             lang_state, title, audio_in, language, context, context_btn, timestamps, diarize, num_speakers,
-            min_speakers, max_speakers, formats, run_btn, acc_settings, tab_output, output_dir, subfolder,
+            min_speakers, max_speakers, formats, run_btn, stop_btn, acc_settings, tab_output, output_dir, subfolder,
             keep_audio, hf_token, tab_model, model, aligner_model, backend, device, dtype, backend_kwargs,
-            unload_btn, tab_perf, gpu_mem, batch, max_tokens, sample_rate, channels, normalize, tab_transcript,
-            preview, tab_files, downloads, output_folder, tab_speakers, speakers_hint, speaker_table, rename_btn,
+            unload_btn, tab_perf, gpu_mem, batch, max_tokens, align_batch, sample_rate, channels, normalize,
+            tab_optimize, optimize_desc, optimize_btn, apply_btn, tab_transcript,
+            preview, tab_files, downloads, output_folder, tab_speakers, speakers_hint, speaker_table, rename_btn, confirm_text, confirm_no, confirm_yes, optimized_box,
         ]
 
         def switch_language(lang: str, current_status: str, current_metrics: str):
@@ -417,13 +563,13 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
 
         def build_settings(values: dict[str, Any]) -> ScribaSettings:
             values = {**values, "formats": values["formats"] or [], "output_dir": values["output_dir"] or str(a.output_root)}
-            return TranscriptionForm(**values).to_settings(base)
+            return TranscriptionForm(**values).to_settings(current())
 
         inputs = dict(
             output_dir=output_dir, subfolder=subfolder, language=language, context=context, timestamps=timestamps,
             diarize=diarize, num_speakers=num_speakers, min_speakers=min_speakers, max_speakers=max_speakers,
             hf_token=hf_token, formats=formats, model=model, aligner_model=aligner_model, backend=backend,
-            device=device, dtype=dtype, gpu_mem=gpu_mem, batch=batch, max_tokens=max_tokens, normalize=normalize,
+            device=device, dtype=dtype, gpu_mem=gpu_mem, batch=batch, max_tokens=max_tokens, align_batch=align_batch, normalize=normalize,
             sample_rate=sample_rate, channels=channels, keep_audio=keep_audio, backend_kwargs=backend_kwargs,
         )
         input_names = list(inputs)
@@ -503,14 +649,17 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
             transcript = result.transcript
             has_speakers = bool(transcript.speakers)
             yield emit(
-                t(lang, "done"), "done",
+                t(lang, "done") if transcript.completed else t(lang, "stopped").format(
+                    processed=format_clock(transcript.processed_seconds or 0), duration=format_clock(transcript.duration)),
+                "done" if transcript.completed else "error",
                 progress="",
                 metrics=metrics_html(lang, format_clock(result.processing_seconds), format_clock(result.audio.duration),
                                      f"{result.rtf:.3f}" if result.rtf else "—"),
                 preview=render_preview(transcript),
                 downloads=_download_copies(result.files, result.job_id),
                 output_folder=str(result.job_dir),
-                warnings="".join(alert_html(w, "", kind="warn") for w in result.warnings),
+                warnings="".join(alert_html(t(lang, w[5:]) if w.startswith("warn:") else w, "", kind="warn")
+                                 for w in result.warnings),
                 speakers_hint=gr.Markdown(visible=not has_speakers),
                 rename_group=gr.Column(visible=has_speakers),
                 speaker_table=[[s, ""] for s in transcript.speakers] if has_speakers else [],
@@ -519,6 +668,12 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
 
         run_btn.click(run, inputs=[audio_in, lang_state, *inputs.values()], outputs=outputs,
                       concurrency_limit=1, concurrency_id="gpu")
+
+        def stop(lang: str):
+            # Not on the GPU queue: it must run while a transcription holds it.
+            return status_html(t(lang, "stopping"), "running") if service.request_cancel() else gr.skip()
+
+        stop_btn.click(stop, inputs=lang_state, outputs=status, queue=False)
 
         def do_rename(job_dir: str | None, table: Any, lang: str):
             if not job_dir:
@@ -545,15 +700,93 @@ def build_app(base: ScribaSettings, service: Any = None, default_lang: str = DEF
 
         unload_btn.click(unload, inputs=lang_state, outputs=model_state, concurrency_limit=1, concurrency_id="gpu")
 
+        # ---------------------------------------------------------------- optimization
+        def run_optimization(lang: str, *vals: Any):
+            from scriba.core.optimizer import CANDIDATES, InferenceOptimizer, OptimizerProgress
+
+            try:
+                opt_settings = build_settings(dict(zip(input_names, vals)))
+            except Exception as exc:
+                msg = exc.user_message() if isinstance(exc, ScribaError) else str(exc)
+                yield alert_html(t(lang, "error_title"), f"{t(lang, 'invalid_settings')} {msg}"), gr.skip(), gr.skip()
+                return
+            progress_state = OptimizerProgress(len(CANDIDATES))
+            box: dict[str, Any] = {}
+
+            def worker() -> None:
+                with lock:
+                    try:
+                        box["result"] = InferenceOptimizer(service).run(opt_settings, write_env=False,
+                                                                        progress=progress_state)
+                    except Exception as exc:
+                        box["error"] = exc
+                box["finished"] = True
+
+            threading.Thread(target=worker, daemon=True).start()
+            yield "", gr.Button(visible=False), None
+            while "finished" not in box:
+                yield optimizer_html(progress_state.snapshot(), lang), gr.skip(), gr.skip()
+                time.sleep(1.0)
+            if "error" in box:
+                exc = box["error"]
+                msg = exc.user_message() if isinstance(exc, ScribaError) else f"{type(exc).__name__}: {exc}"
+                yield alert_html(t(lang, "error_title"), t(lang, "optimize_failed"), msg,
+                                 detail_label=t(lang, "error_details")), gr.skip(), gr.skip()
+                return
+            result = box["result"]
+            yield optimizer_html(progress_state.snapshot(), lang, result.to_dict()), gr.Button(visible=True), result
+
+        def ask_or_run():
+            from scriba.core.optimizer import optimization_status
+
+            already = optimization_status()["optimized"]
+            return gr.Group(visible=already), not already
+
+        def run_if_not_optimized(go: bool, lang: str, *vals: Any):
+            if not go:  # already optimized: wait for the Yes/No answer
+                yield gr.skip(), gr.skip(), gr.skip()
+                return
+            yield from run_optimization(lang, *vals)
+
+        proceed = gr.State(False)
+        optimize_btn.click(ask_or_run, outputs=[confirm_box, proceed], queue=False).then(
+            run_if_not_optimized,
+            inputs=[proceed, lang_state, *inputs.values()], outputs=[optimize_out, apply_btn, optimize_state],
+            concurrency_limit=1, concurrency_id="gpu")
+        confirm_no.click(lambda: gr.Group(visible=False), outputs=confirm_box, queue=False)
+        confirm_yes.click(lambda: gr.Group(visible=False), outputs=confirm_box, queue=False).then(
+            run_optimization, inputs=[lang_state, *inputs.values()], outputs=[optimize_out, apply_btn, optimize_state],
+            concurrency_limit=1, concurrency_id="gpu")
+
+        def apply_optimization(result, lang: str):
+            from scriba.core.optimizer import apply_result
+
+            if result is None:
+                return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+            try:
+                path = apply_result(result)
+            except Exception as exc:
+                return (alert_html(t(lang, "error_title"), t(lang, "optimize_failed"), str(exc)), gr.skip(), gr.skip(),
+                        gr.skip())
+            message = t(lang, "optimize_applied").format(path=path)
+            done = f'<div class="scriba-status done"><span class="scriba-dot"></span><span>{html.escape(message)}</span></div>'
+            return done, gr.Number(value=result.best_batch), gr.Button(visible=False), optimized_html(lang)
+
+        apply_btn.click(apply_optimization, inputs=[optimize_state, lang_state],
+                        outputs=[apply_out, batch, apply_btn, optimized_box])
+        # New sessions pick up tuned values written to .env by the optimizer.
+        demo.load(lambda: gr.Number(value=current().asr.max_inference_batch_size), outputs=batch, queue=False)
+
     return demo, service
 
 
-def launch(settings: ScribaSettings, host: str = "127.0.0.1", port: int = 7860, preload: bool = False,
-           lang: str = DEFAULT_LANG) -> None:
+def launch(settings: ScribaSettings | SettingsProvider, host: str = "127.0.0.1", port: int = 7860,
+           preload: bool = False, lang: str = DEFAULT_LANG) -> None:
     import os
 
     os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
-    setup_logging(settings.app.log_level)
+    resolved = settings.get() if isinstance(settings, SettingsProvider) else settings
+    setup_logging(resolved.app.log_level)
     try:
         import gradio  # noqa: F401
     except ImportError as exc:
@@ -562,7 +795,7 @@ def launch(settings: ScribaSettings, host: str = "127.0.0.1", port: int = 7860, 
     demo, service = build_app(settings, default_lang=lang)
     if preload:
         log.info("Preloading model...")
-        service.engine.ensure_loaded(settings.asr)
+        service.engine.ensure_loaded(resolved.asr)
 
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     log.info("%s UI on http://%s:%s", APP_NAME, shown, port)
