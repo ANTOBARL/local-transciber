@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scriba"
+version = "0.1.0"
+description = "Local-first long-form audio transcription powered by Qwen3-ASR."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy",
+    "av",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml",
+    "typer>=0.12",
+    "rich",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+asr = ["qwen-asr"]
+vllm = ["qwen-asr[vllm]"]
+ui = ["gradio>=5"]
+diarization = ["pyannote.audio"]
+ffmpeg = ["imageio-ffmpeg"]
+monitor = ["psutil"]
+dev = ["pytest"]
+all = ["qwen-asr", "gradio>=5", "imageio-ffmpeg", "psutil", "pytest"]
+
+[project.scripts]
+scriba = "scriba.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scriba = ["default.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

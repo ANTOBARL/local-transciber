@@ -1,0 +1,36 @@
+"""Languages supported by Qwen3-ASR (kept here so the UI/CLI don't import the model stack)."""
+
+AUTO_DETECT = "Auto detect"
+
+SUPPORTED_LANGUAGES: list[str] = [
+    "Italian",
+    "English",
+    "Chinese",
+    "Cantonese",
+    "Arabic",
+    "German",
+    "French",
+    "Spanish",
+    "Portuguese",
+    "Indonesian",
+    "Korean",
+    "Russian",
+    "Thai",
+    "Vietnamese",
+    "Japanese",
+    "Turkish",
+    "Hindi",
+    "Malay",
+    "Dutch",
+    "Swedish",
+    "Danish",
+    "Finnish",
+    "Polish",
+    "Czech",
+    "Filipino",
+    "Persian",
+    "Greek",
+    "Romanian",
+    "Hungarian",
+    "Macedonian",
+]

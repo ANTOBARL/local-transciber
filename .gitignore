@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Scriba
+frontend/node_modules/
+frontend/dist/
+outputs/*
+!outputs/.gitkeep
+samples/*
+!samples/.gitkeep
+.claude/
+*.tsbuildinfo

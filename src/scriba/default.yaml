@@ -1,0 +1,57 @@
+# Scriba default configuration.
+# Hardware-agnostic: "auto" values are resolved at runtime from the available devices.
+
+app:
+  output_root: "./outputs"
+  create_job_subfolder: true
+  keep_normalized_audio: false
+  overwrite: false
+  log_level: "INFO"
+
+audio:
+  normalize: true          # decode + resample with FFmpeg (fallback: PyAV)
+  sample_rate: 16000
+  channels: 1
+  ffmpeg_path: null        # null = PATH, then imageio-ffmpeg
+
+asr:
+  model: "Qwen/Qwen3-ASR-1.7B"
+  backend: "auto"          # auto | transformers | vllm
+  device: "auto"           # auto | cuda | cuda:0 | cpu
+  dtype: "auto"            # auto | bfloat16 | float16 | float32
+
+  language: "Italian"      # null = auto detect
+  context: ""
+
+  gpu_memory_utilization: 0.70   # vLLM only
+  max_inference_batch_size: 32
+  max_new_tokens: 4096
+
+  return_timestamps: true
+
+  forced_aligner:
+    enabled: true
+    model: "Qwen/Qwen3-ForcedAligner-0.6B"
+    dtype: "auto"
+    device: "auto"
+
+  backend_kwargs: {}
+
+diarization:
+  enabled: true            # falls back to a plain transcript (with a warning) if pyannote/token are missing
+  model: "pyannote/speaker-diarization-community-1"
+  device: "auto"
+  hf_token: null
+  num_speakers: null
+  min_speakers: null
+  max_speakers: null
+
+export:
+  json: true
+  txt: true
+  markdown: true
+  srt: true
+  vtt: false
+  max_segment_seconds: 12.0
+  max_segment_chars: 160
+  pause_split_seconds: 0.8
