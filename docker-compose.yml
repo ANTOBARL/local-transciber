@@ -17,6 +17,7 @@ services:
     volumes:
       - scriba-models:/models         # Hugging Face cache: models are downloaded once
       - ./outputs:/data/outputs       # transcripts land in the project outputs/ folder
+      - ./config:/data/config         # tuned settings written by the optimizer (config/.env)
     gpus: all
     restart: unless-stopped
 

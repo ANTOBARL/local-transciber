@@ -32,6 +32,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     GRADIO_ANALYTICS_ENABLED=False \
     PYANNOTE_METRICS_ENABLED=false \
     SCRIBA_APP__OUTPUT_ROOT=/data/outputs \
+    SCRIBA_ENV_FILE=/data/config/.env \
+    SCRIBA_CACHE_DIR=/data/config \
     SCRIBA_FRONTEND_DIR=/opt/scriba/frontend
 
 RUN apt-get update \
@@ -53,7 +55,7 @@ RUN pip install ".[asr,ffmpeg,monitor]" \
 COPY --from=frontend /build/dist ${SCRIBA_FRONTEND_DIR}
 
 RUN useradd --create-home --uid 1000 scriba \
- && mkdir -p /data/outputs /models \
+ && mkdir -p /data/outputs /data/config /models \
  && chown -R scriba:scriba /data /models
 USER scriba
 
