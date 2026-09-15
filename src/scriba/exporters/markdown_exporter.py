@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scriba.exporters.render import speaker_blocks
+from scriba.exporters.render import interruption_note, speaker_blocks
 from scriba.models import Transcript
 from scriba.utils.time import format_clock
 
@@ -19,6 +19,9 @@ def render_markdown(transcript: Transcript) -> str:
     if transcript.speakers:
         names = ", ".join(transcript.speaker_label(s) or s for s in transcript.speakers)
         lines.append(f"- **Speakers:** {names}")
+    note = interruption_note(transcript)
+    if note:
+        lines += ["", f"> **⚠ {note}**"]
     lines += ["", "---", ""]
 
     if not transcript.has_timestamps and not transcript.speakers:
@@ -29,6 +32,8 @@ def render_markdown(transcript: Transcript) -> str:
             if block.speaker:
                 header += f" **{block.speaker}**"
             lines += [header, "", block.text, ""]
+    if note:
+        lines += ["", "---", "", f"> **⚠ {note}**"]
     return "\n".join(lines).rstrip() + "\n"
 
 

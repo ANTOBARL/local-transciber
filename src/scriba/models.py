@@ -46,6 +46,8 @@ class Transcript(BaseModel):
     created_at: datetime
     text: str
     has_timestamps: bool = False
+    completed: bool = True                  # False when the user stopped the transcription
+    processed_seconds: float | None = None  # audio covered by a partial transcript
     segments: list[Segment] = Field(default_factory=list)
     speakers: list[str] = Field(default_factory=list)
     speaker_names: dict[str, str] = Field(default_factory=dict)
@@ -66,12 +68,14 @@ class JobStatus(str, Enum):
     DIARIZING = "diarizing"
     EXPORTING = "exporting"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"   # stopped by the user; partial results were exported
     FAILED = "failed"
 
 
 class StepStatus(str, Enum):
     SKIPPED = "skipped"
     COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
     FAILED = "failed"
 
 

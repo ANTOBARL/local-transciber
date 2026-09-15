@@ -22,6 +22,7 @@ def to_transcript(
 ) -> Transcript:
     text = raw.text.strip()
     language = forced_language or raw.language or "unknown"
+    covered = duration if raw.completed else (raw.processed_seconds or 0.0)
 
     if raw.tokens is not None and text:
         words = align_words(text, raw.tokens)
@@ -33,8 +34,14 @@ def to_transcript(
         )
         has_timestamps = bool(words)
     else:
-        segments = [Segment(text=text, start=0.0, end=duration)] if text else []
+        segments = [Segment(text=text, start=0.0, end=covered)] if text else []
         has_timestamps = False
+
+    if raw.tail_text:
+        # Transcribed before the stop but not yet aligned: keep it as one untimed block.
+        start = raw.tail_start if raw.tail_start is not None else (segments[-1].end if segments else 0.0)
+        segments.append(Segment(text=raw.tail_text, start=start, end=max(covered, start)))
+        text = f"{text} {raw.tail_text}".strip()
 
     return Transcript(
         id=job_id,
@@ -45,6 +52,8 @@ def to_transcript(
         created_at=now_utc(),
         text=text,
         has_timestamps=has_timestamps,
+        completed=raw.completed,
+        processed_seconds=None if raw.completed else round(covered, 3),
         segments=segments,
         metadata=metadata or {},
     )

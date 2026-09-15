@@ -8,6 +8,17 @@ from scriba.core.aligner import join_words
 from scriba.models import Transcript, Word
 
 
+def interruption_note(transcript: Transcript) -> str | None:
+    """Clear marker written into every human-readable export of a stopped transcription."""
+    if transcript.completed:
+        return None
+    from scriba.utils.time import format_clock
+
+    covered = transcript.processed_seconds or 0.0
+    return (f"La trascrizione si è interrotta a {format_clock(covered)} "
+            f"di {format_clock(transcript.duration)}")
+
+
 @dataclass
 class Block:
     start: float
