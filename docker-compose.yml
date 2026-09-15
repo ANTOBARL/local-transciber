@@ -1,0 +1,24 @@
+services:
+  scriba:
+    build:
+      context: .
+      args:
+        INSTALL_DIARIZATION: "true"
+        INSTALL_VLLM: "false"        # "true" enables the vLLM backend (Linux containers only)
+    image: scriba:latest
+    container_name: scriba
+    ports:
+      - "127.0.0.1:8000:8000"         # local only; remove 127.0.0.1 to expose on the LAN
+    env_file:
+      - path: .env
+        required: false               # SCRIBA_DIARIZATION__HF_TOKEN=hf_...
+    environment:
+      SCRIBA_ASR__BACKEND: auto
+    volumes:
+      - scriba-models:/models         # Hugging Face cache: models are downloaded once
+      - ./outputs:/data/outputs       # transcripts land in the project outputs/ folder
+    gpus: all
+    restart: unless-stopped
+
+volumes:
+  scriba-models:
