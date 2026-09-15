@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from scriba.config import ScribaSettings
 from scriba.errors import ScribaError
 
-EXPORT_FORMATS = ["json", "txt", "markdown", "srt", "vtt"]
+EXPORT_FORMATS = ["json", "txt", "markdown", "srt", "vtt", "docx"]
 DTYPE_CHOICES = ["auto", "bfloat16", "float16", "float32"]
 BACKEND_CHOICES = ["auto", "transformers", "vllm"]
 
@@ -42,6 +42,7 @@ class TranscriptionForm(BaseModel):
 
     gpu_mem: float = 0.70
     batch: int = 32
+    align_batch: int = 0
     max_tokens: int = 4096
     sample_rate: int = 16000
     channels: int = 1
@@ -58,7 +59,7 @@ class TranscriptionForm(BaseModel):
             model=s.asr.model, aligner_model=s.asr.forced_aligner.model, backend=s.asr.backend,
             device=s.asr.device, dtype=s.asr.dtype, backend_kwargs=json.dumps(s.asr.backend_kwargs, indent=2),
             gpu_mem=s.asr.gpu_memory_utilization, batch=s.asr.max_inference_batch_size,
-            max_tokens=s.asr.max_new_tokens, sample_rate=s.audio.sample_rate, channels=s.audio.channels,
+            max_tokens=s.asr.max_new_tokens, align_batch=s.asr.align_batch_size, sample_rate=s.audio.sample_rate, channels=s.audio.channels,
             normalize=s.audio.normalize,
         )
 
@@ -83,6 +84,7 @@ class TranscriptionForm(BaseModel):
                 "model": self.model.strip(), "backend": self.backend, "device": self.device.strip(),
                 "dtype": self.dtype, "language": self.language, "context": self.context,
                 "gpu_memory_utilization": float(self.gpu_mem), "max_inference_batch_size": int(self.batch),
+                "align_batch_size": int(self.align_batch),
                 "max_new_tokens": int(self.max_tokens), "return_timestamps": self.timestamps,
                 "forced_aligner": {"model": self.aligner_model.strip(), "dtype": self.dtype},
                 "backend_kwargs": kwargs,

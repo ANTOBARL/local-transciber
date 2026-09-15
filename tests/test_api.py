@@ -15,7 +15,8 @@ from test_pipeline import FakeEngine, wav_file  # noqa: F401  (fixture reuse)
 
 @pytest.fixture
 def client(tmp_path):
-    settings = load_settings(overrides={"app": {"output_root": str(tmp_path / "out")}})
+    settings = load_settings(overrides={"app": {"output_root": str(tmp_path / "out")},
+                                        "diarization": {"hf_token": "hf_test"}})
     service = TranscriptionService()
     service.engine = FakeEngine()
 
@@ -69,6 +70,23 @@ def test_full_flow_with_speaker_rename(client, wav_file):  # noqa: F811
 
     renamed = client.post(f"/api/tasks/{task_id}/speakers", json={"names": {"SPEAKER_00": "Luca"}}).json()
     assert "Luca" in renamed["preview"]
+
+
+def test_optimize_endpoint_writes_env_and_updates_defaults(client, tmp_path, monkeypatch):
+    env = tmp_path / "tuned.env"
+    monkeypatch.setenv("SCRIBA_ENV_FILE", str(env))
+    defaults = client.get("/api/config").json()["defaults"]
+    task_id = client.post("/api/optimize", json={"form": defaults}).json()["task_id"]
+    body = wait_done(client, task_id, timeout=60)
+
+    assert body["state"] == "done", body
+    assert not env.exists()  # measuring never writes: the user must press "Apply"
+    best = body["optimization"]["best_batch"]
+
+    applied = client.post(f"/api/tasks/{task_id}/apply").json()
+    assert applied["optimization"]["env_path"] == str(env)
+    assert f"SCRIBA_ASR__MAX_INFERENCE_BATCH_SIZE={best}" in env.read_text(encoding="utf-8")
+    assert client.get(f"/api/tasks/{task_id}/files/transcript.json").status_code == 404
 
 
 def test_invalid_backend_kwargs_is_400(client, wav_file):  # noqa: F811

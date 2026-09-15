@@ -22,13 +22,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from scriba import APP_NAME, __version__
-from scriba.config import ScribaSettings
+from scriba.config import ScribaSettings, SettingsProvider
 from scriba.errors import ScribaError
 from scriba.i18n import LANGUAGE_NAMES_IT, TEXTS, UI_LANGUAGES
 from scriba.languages import SUPPORTED_LANGUAGES
 from scriba.models import JobStatus
 from scriba.utils.logging import get_logger
 from scriba.utils.paths import MEDIA_EXTENSIONS
+from scriba.core.optimizer import optimization_status
 from scriba.webform import BACKEND_CHOICES, DTYPE_CHOICES, EXPORT_FORMATS, TranscriptionForm
 
 log = get_logger("api")
@@ -40,9 +41,10 @@ MAX_TASKS_KEPT = 50
 @dataclass
 class Task:
     id: str
-    upload_path: Path
+    upload_path: Path | None
     filename: str
     settings: ScribaSettings
+    kind: str = "transcribe"  # transcribe | optimize
     state: str = "queued"  # queued | running | done | error
     status: str | None = None  # JobStatus value
     error: str | None = None
@@ -50,10 +52,16 @@ class Task:
     started: float | None = None
     finished: float | None = None
     result: Any = None
+    optimizer_progress: Any = None
+    cancel_requested: bool = False
 
 
 class StartTask(BaseModel):
     upload_id: str
+    form: TranscriptionForm
+
+
+class StartOptimization(BaseModel):
     form: TranscriptionForm
 
 
@@ -87,7 +95,7 @@ class TaskManager:
     def _worker(self) -> None:
         while True:
             task = self.tasks.get(self._queue.get())
-            if task is None:
+            if task is None or task.state != "queued":  # removed or cancelled while waiting
                 continue
             with self._lock:
                 task.state, task.started = "running", time.time()
@@ -96,7 +104,15 @@ class TaskManager:
                     task.status = status.value
 
                 try:
-                    task.result = self.service.transcribe(task.upload_path, task.settings, progress=progress)
+                    if task.kind == "optimize":
+                        from scriba.core.optimizer import InferenceOptimizer
+
+                        task.status = "optimizing"
+                        # Measure only: values are saved when the user presses "Apply".
+                        task.result = InferenceOptimizer(self.service).run(task.settings, write_env=False,
+                                                                           progress=task.optimizer_progress)
+                    else:
+                        task.result = self.service.transcribe(task.upload_path, task.settings, progress=progress)
                     task.state = "done"
                 except Exception as exc:
                     task.error = exc.user_message() if isinstance(exc, ScribaError) else f"{type(exc).__name__}: {exc}"
@@ -114,12 +130,14 @@ def _file_entries(task_id: str, files: dict[str, Path]) -> list[dict[str, str]]:
     return [{"format": fmt, "name": p.name, "url": f"/api/tasks/{task_id}/files/{p.name}"} for fmt, p in files.items()]
 
 
-def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | None = None,
+def create_app(base: ScribaSettings | SettingsProvider, service: Any = None, frontend_dir: Path | None = None,
                default_lang: str = "it") -> FastAPI:
     from scriba.core.pipeline import TranscriptionService, apply_speaker_names
     from scriba.exporters import EXPORTERS, load_transcript
     from scriba.ui import render_preview
 
+    # A provider re-reads .env on change, so optimizer results apply without a restart.
+    current = base.get if isinstance(base, SettingsProvider) else (lambda: base)
     service = service or TranscriptionService()
     manager = TaskManager(service)
     app = FastAPI(title=f"{APP_NAME} API", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -140,10 +158,11 @@ def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | N
     def config():
         return {
             "app": APP_NAME, "version": __version__, "default_lang": default_lang,
-            "defaults": TranscriptionForm.from_settings(base).model_dump(),
+            "defaults": TranscriptionForm.from_settings(current()).model_dump(),
             "languages": SUPPORTED_LANGUAGES, "export_formats": EXPORT_FORMATS,
             "dtypes": DTYPE_CHOICES, "backends": BACKEND_CHOICES,
             "media_extensions": sorted(MEDIA_EXTENSIONS),
+            "optimization": optimization_status(),
         }
 
     @app.get("/api/i18n")
@@ -178,8 +197,18 @@ def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | N
         up = manager.uploads.get(body.upload_id)
         if up is None:
             raise HTTPException(404, "Upload not found, upload the file again")
-        settings = body.form.to_settings(base)
+        settings = body.form.to_settings(current())
         task = Task(id=uuid.uuid4().hex, upload_path=up["path"], filename=up["path"].name, settings=settings)
+        manager.submit(task)
+        return {"task_id": task.id}
+
+    @app.post("/api/optimize")
+    def start_optimization(body: StartOptimization):
+        from scriba.core.optimizer import CANDIDATES, OptimizerProgress
+
+        settings = body.form.to_settings(current())
+        task = Task(id=uuid.uuid4().hex, upload_path=None, filename="benchmark", settings=settings, kind="optimize",
+                    optimizer_progress=OptimizerProgress(len(CANDIDATES)))
         manager.submit(task)
         return {"task_id": task.id}
 
@@ -194,13 +223,21 @@ def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | N
         task = _task(task_id)
         now = task.finished or time.time()
         payload: dict[str, Any] = {
-            "id": task.id, "state": task.state, "status": task.status, "error": task.error,
+            "id": task.id, "kind": task.kind, "state": task.state, "status": task.status, "error": task.error,
             "filename": task.filename, "queue_position": manager.queue_position(task.id),
             "elapsed": round(now - task.started, 1) if task.started else 0.0,
             "progress": None,
+            "cancel_requested": task.cancel_requested,
         }
         if task.state == "running" and task.status == JobStatus.TRANSCRIBING.value and service.progress is not None:
             payload["progress"] = service.progress.snapshot()
+        if task.kind == "optimize":
+            payload["optimizer"] = task.optimizer_progress.snapshot() if task.optimizer_progress else None
+            if task.state == "done" and task.result is not None:
+                payload["optimization"] = task.result.to_dict()
+                payload["defaults"] = TranscriptionForm.from_settings(current()).model_dump()
+                payload["optimization_status"] = optimization_status()
+            return payload
         r = task.result
         if task.state == "done" and r is not None:
             payload.update({
@@ -214,13 +251,15 @@ def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | N
                 "speakers": r.transcript.speakers,
                 "speaker_names": r.transcript.speaker_names,
                 "job_id": r.job_id,
+                "completed": r.transcript.completed,
+                "processed_seconds": r.transcript.processed_seconds,
             })
         return payload
 
     @app.get("/api/tasks/{task_id}/files/{name}")
     def task_file(task_id: str, name: str):
         task = _task(task_id)
-        if task.result is None:
+        if task.result is None or task.kind != "transcribe":
             raise HTTPException(404, "No output yet")
         allowed = {filename for filename, _ in EXPORTERS.values()}
         if name not in allowed:
@@ -230,10 +269,33 @@ def create_app(base: ScribaSettings, service: Any = None, frontend_dir: Path | N
             raise HTTPException(404, "File not found")
         return FileResponse(path, filename=name)
 
+    @app.post("/api/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str):
+        """Stop a job: queued jobs are dropped, a running transcription stops after the current batch
+        and exports what was processed so far."""
+        task = _task(task_id)
+        if task.state == "queued":
+            task.state, task.error, task.finished = "cancelled", None, time.time()
+        elif task.state == "running" and task.kind == "transcribe":
+            task.cancel_requested = True
+            service.request_cancel()
+        return task_status(task_id)
+
+    @app.post("/api/tasks/{task_id}/apply")
+    def apply_optimization(task_id: str):
+        """Save the result of a finished optimization to the .env file."""
+        from scriba.core.optimizer import apply_result
+
+        task = _task(task_id)
+        if task.kind != "optimize" or task.state != "done" or task.result is None:
+            raise HTTPException(409, "No finished optimization to apply")
+        apply_result(task.result)
+        return task_status(task_id)
+
     @app.post("/api/tasks/{task_id}/speakers")
     def rename(task_id: str, body: SpeakerNames):
         task = _task(task_id)
-        if task.result is None:
+        if task.result is None or task.kind != "transcribe":
             raise HTTPException(409, "Task has no transcript")
         files = manager.with_gpu_lock(apply_speaker_names, task.result.job_dir, body.names)
         task.result.files = files
@@ -273,18 +335,19 @@ def default_frontend_dir() -> Path | None:
     return next((c for c in candidates if (c / "index.html").is_file()), None)
 
 
-def serve(settings: ScribaSettings, host: str = "127.0.0.1", port: int = 8000, preload: bool = False,
+def serve(settings: ScribaSettings | SettingsProvider, host: str = "127.0.0.1", port: int = 8000, preload: bool = False,
           frontend_dir: Path | None = None, lang: str = "it") -> None:
     import uvicorn
 
     from scriba.utils.logging import setup_logging
 
-    setup_logging(settings.app.log_level)
+    resolved = settings.get() if isinstance(settings, SettingsProvider) else settings
+    setup_logging(resolved.app.log_level)
     frontend_dir = frontend_dir or default_frontend_dir()
     app = create_app(settings, frontend_dir=frontend_dir, default_lang=lang)
     if preload:
         log.info("Preloading model...")
-        app.state.manager.with_gpu_lock(app.state.manager.service.engine.ensure_loaded, settings.asr)
+        app.state.manager.with_gpu_lock(app.state.manager.service.engine.ensure_loaded, resolved.asr)
     log.info("%s on http://%s:%s (frontend: %s)", APP_NAME, "localhost" if host in ("127.0.0.1", "0.0.0.0") else host,
              port, frontend_dir or "not built")
     uvicorn.run(app, host=host, port=port, log_level="warning")

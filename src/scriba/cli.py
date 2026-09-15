@@ -13,8 +13,9 @@ from rich.console import Console
 from rich.table import Table
 
 from scriba import APP_NAME, __version__
-from scriba.config import ScribaSettings, dotted_to_nested, load_settings, parse_set_option
+from scriba.config import ScribaSettings, SettingsProvider, dotted_to_nested, load_settings, parse_set_option
 from scriba.errors import ScribaError
+from scriba.i18n import t
 
 app = typer.Typer(
     name="scriba",
@@ -38,6 +39,16 @@ def _settings(config: Path | None, flat: dict[str, Any], sets: list[str] | None)
         key, value = parse_set_option(item)
         overrides[key] = value
     return load_settings(config, dotted_to_nested(overrides))
+
+
+def _provider(config: Path | None, sets: list[str] | None) -> SettingsProvider:
+    overrides: dict[str, Any] = {}
+    for item in sets or []:
+        key, value = parse_set_option(item)
+        overrides[key] = value
+    provider = SettingsProvider(config, dotted_to_nested(overrides))
+    provider.get()  # validate early
+    return provider
 
 
 def _fail(exc: Exception) -> None:
@@ -76,8 +87,9 @@ def _transcribe_options(
         "app.keep_normalized_audio": keep_audio,
     }
     if formats:
-        wanted = {f.strip().lower().replace("md", "markdown") for f in formats.split(",") if f.strip()}
-        for fmt in ("json", "txt", "markdown", "srt", "vtt"):
+        aliases = {"md": "markdown", "word": "docx"}
+        wanted = {aliases.get(f.strip().lower(), f.strip().lower()) for f in formats.split(",") if f.strip()}
+        for fmt in ("json", "txt", "markdown", "srt", "vtt", "docx"):
             flat[f"export.{fmt}"] = fmt in wanted
     return _settings(config, flat, sets)
 
@@ -98,7 +110,7 @@ def transcribe(
     num_speakers: Annotated[Optional[int], typer.Option("--num-speakers")] = None,
     min_speakers: Annotated[Optional[int], typer.Option("--min-speakers")] = None,
     max_speakers: Annotated[Optional[int], typer.Option("--max-speakers")] = None,
-    formats: Annotated[Optional[str], typer.Option("--formats", "-f", help="e.g. json,txt,md,srt,vtt")] = None,
+    formats: Annotated[Optional[str], typer.Option("--formats", "-f", help="e.g. json,txt,md,srt,vtt,docx")] = None,
     batch_size: Annotated[Optional[int], typer.Option("--batch-size")] = None,
     gpu_memory: Annotated[Optional[float], typer.Option("--gpu-memory", help="vLLM gpu_memory_utilization")] = None,
     max_new_tokens: Annotated[Optional[int], typer.Option("--max-new-tokens")] = None,
@@ -123,6 +135,19 @@ def transcribe(
 
     service = TranscriptionService()
     failures = 0
+
+    import signal
+
+    def on_interrupt(_signum, _frame):
+        # First Ctrl+C: stop after the current batch and export the partial transcript.
+        # Second Ctrl+C: exit immediately.
+        if service.request_cancel():
+            console.print("\n[yellow]Stopping after the current batch… (Ctrl+C again to quit now)[/]")
+        else:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, on_interrupt)
     for path in audio:
         console.rule(f"[bold]{path.name}")
         try:
@@ -142,7 +167,7 @@ def transcribe(
         table.add_row("Files", ", ".join(p.name for p in result.files.values()))
         console.print(table)
         for w in result.warnings:
-            console.print(f"[yellow]Warning:[/] {w}")
+            console.print(f"[yellow]Warning:[/] {t('en', w[5:]) if w.startswith('warn:') else w}")
     raise typer.Exit(1 if failures else 0)
 
 
@@ -331,6 +356,40 @@ def benchmark(
     console.print(table)
 
 
+# ---------------------------------------------------------------------------- optimize
+@app.command()
+def optimize(
+    write: Annotated[bool, typer.Option("--write/--dry-run", help="Save the best values to the .env file.")] = True,
+    config: ConfigOpt = None,
+    sets: SetOpt = None,
+) -> None:
+    """Benchmark batch sizes on the bundled recording and save the fastest safe setting."""
+    from scriba.core.optimizer import InferenceOptimizer
+    from scriba.core.pipeline import TranscriptionService
+    from scriba.utils.logging import setup_logging
+
+    try:
+        settings = _settings(config, {}, sets)
+    except Exception as exc:
+        _fail(exc)
+    setup_logging(settings.app.log_level)
+    console.print("[bold]Optimizing inference parameters[/] (this can take a few minutes)\n")
+    try:
+        result = InferenceOptimizer(TranscriptionService()).run(settings, write_env=write)
+    except Exception as exc:
+        _fail(exc)
+
+    table = Table("Batch", "Speed (x realtime)", "Peak VRAM", "Result")
+    for t in result.trials:
+        mark = "[green]" if t.batch == result.best_batch else ""
+        table.add_row(f"{mark}{t.batch}", f"{t.speed:.1f}" if t.speed else "—",
+                      f"{t.peak_vram_mb:.0f} MB" if t.peak_vram_mb is not None else "—", t.status)
+    console.print(table)
+    console.print(f"\nBest batch size: [bold green]{result.best_batch}[/] (was {result.previous_batch}) on {result.device}")
+    if result.env_path:
+        console.print(f"Saved to [bold]{result.env_path}[/]")
+
+
 # ---------------------------------------------------------------------------- rename
 @app.command()
 def rename(
@@ -365,7 +424,7 @@ def ui(
 ) -> None:
     """Launch the local web UI."""
     try:
-        settings = _settings(config, {}, sets)
+        settings = _provider(config, sets)
     except Exception as exc:
         _fail(exc)
     from scriba.ui import launch
@@ -385,7 +444,7 @@ def serve(
 ) -> None:
     """Start the HTTP API and the React web app."""
     try:
-        settings = _settings(config, {}, sets)
+        settings = _provider(config, sets)
     except Exception as exc:
         _fail(exc)
     from scriba.api import serve as run_server
