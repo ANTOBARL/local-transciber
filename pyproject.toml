@@ -37,7 +37,7 @@ scriba = "scriba.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-scriba = ["default.yaml"]
+scriba = ["default.yaml", "assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

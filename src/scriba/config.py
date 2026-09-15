@@ -8,6 +8,7 @@ the CLI and the UI. Precedence (lowest → highest):
 from __future__ import annotations
 
 import copy
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -54,6 +55,7 @@ class ASRSettings(BaseModel):
 
     gpu_memory_utilization: float = Field(0.70, gt=0.0, le=1.0)
     max_inference_batch_size: int = Field(32, ge=-1)
+    align_batch_size: int = Field(0, ge=0)  # 0 = automatic (half of the ASR batch); alignment needs more memory
     max_new_tokens: int = Field(4096, ge=1)
 
     return_timestamps: bool = True
@@ -98,6 +100,7 @@ class ExportSettings(BaseModel):
     markdown: bool = True
     srt: bool = True
     vtt: bool = False
+    docx: bool = False
     max_segment_seconds: float = Field(12.0, gt=0)
     max_segment_chars: int = Field(160, ge=20)
     pause_split_seconds: float = Field(0.8, ge=0)
@@ -105,7 +108,8 @@ class ExportSettings(BaseModel):
     model_config = {"populate_by_name": True}
 
     def enabled_formats(self) -> list[str]:
-        flags = {"json": self.json_, "txt": self.txt, "markdown": self.markdown, "srt": self.srt, "vtt": self.vtt}
+        flags = {"json": self.json_, "txt": self.txt, "markdown": self.markdown, "srt": self.srt, "vtt": self.vtt,
+                 "docx": self.docx}
         return [name for name, on in flags.items() if on]
 
 
@@ -119,8 +123,7 @@ class ScribaSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="SCRIBA_",
         env_nested_delimiter="__",
-        # Project .env (editable install) first, then the current directory's .env overrides it.
-        env_file=(str(Path(__file__).resolve().parents[2] / ".env"), ".env"),
+        # Dotenv files are passed at load time (see load_settings) so they are re-read dynamically.
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -189,15 +192,46 @@ def load_settings(
     config_path: str | Path | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> ScribaSettings:
-    """Load defaults, then the given YAML file (if any), env vars, and explicit overrides."""
+    """Load defaults, then the given YAML file (if any), .env files, env vars, and explicit overrides."""
+    from scriba.envfile import env_files_to_read
+
     data: dict[str, Any] = _read_yaml(DEFAULT_CONFIG_PATH)
     if config_path is not None:
         path = Path(config_path)
         if not path.is_file():
             raise FileNotFoundError(f"Config file not found: {path}")
         data = deep_merge(data, _read_yaml(path))
-    settings = ScribaSettings(**data)
+    env_files = tuple(str(p) for p in env_files_to_read() if p.is_file())
+    settings = ScribaSettings(_env_file=env_files or None, **data)
     return settings.with_overrides(overrides)
+
+
+class SettingsProvider:
+    """Returns up-to-date settings, reloading when the YAML or .env files change on disk.
+
+    Lets the optimizer write tuned values that running servers pick up without a restart.
+    """
+
+    def __init__(self, config_path: str | Path | None = None, overrides: dict[str, Any] | None = None):
+        self.config_path = Path(config_path) if config_path else None
+        self.overrides = overrides
+        self._stamp: tuple | None = None
+        self._settings: ScribaSettings | None = None
+        self._lock = threading.Lock()
+
+    def _current_stamp(self) -> tuple:
+        from scriba.envfile import env_files_to_read
+
+        paths = [*env_files_to_read(), *([self.config_path] if self.config_path else [])]
+        return tuple((str(p), p.stat().st_mtime_ns if p.is_file() else None) for p in paths)
+
+    def get(self) -> ScribaSettings:
+        with self._lock:
+            stamp = self._current_stamp()
+            if self._settings is None or stamp != self._stamp:
+                self._settings = load_settings(self.config_path, self.overrides)
+                self._stamp = stamp
+            return self._settings
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

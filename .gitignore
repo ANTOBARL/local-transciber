@@ -225,4 +225,6 @@ outputs/*
 samples/*
 !samples/.gitkeep
 .claude/
+config/models/
+config/*.json
 *.tsbuildinfo

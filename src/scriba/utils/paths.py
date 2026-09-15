@@ -16,9 +16,23 @@ VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".mov", ".avi", ".wmv", ".flv", ".mp
 MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 
 
-def new_job_id(when: datetime | None = None) -> str:
-    """YYYYMMDD_HHMMSS_<short_uuid>"""
+def safe_name(text: str, max_length: int = 80) -> str:
+    """Filesystem-safe name: letters (any script), digits, dot, dash, underscore; spaces become '_'."""
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFC", text).strip()
+    text = re.sub(r"\s+", "_", text)
+    text = "".join(ch for ch in text if ch.isalnum() or ch in "._-")
+    text = re.sub(r"_+", "_", text).strip("._-")
+    return text[:max_length].rstrip("._-") or "audio"
+
+
+def new_job_id(when: datetime | None = None, source: str | Path | None = None) -> str:
+    """<audio_name>_YYYYMMDD_HHMMSS, or YYYYMMDD_HHMMSS_<short_uuid> without a source."""
     when = when or datetime.now()
+    if source is not None:
+        return f"{safe_name(Path(source).stem)}_{when:%Y%m%d_%H%M%S}"
     return f"{when:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
 
