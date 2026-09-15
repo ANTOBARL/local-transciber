@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,18 @@ from scriba.utils import device as dev
 from scriba.utils.logging import get_logger
 
 log = get_logger("diarizer")
+
+
+def local_model_dir(model: str) -> Path | None:
+    """A local copy of the pyannote pipeline, usable offline and without a token.
+
+    Looked up, in order: `model` itself as a directory, then `<config dir>/models/<org>--<name>`
+    (the folder next to the .env file, mounted at /data/config in the container).
+    """
+    from scriba.envfile import env_file_path
+
+    candidates = [Path(model), env_file_path().parent / "models" / model.replace("/", "--")]
+    return next((c for c in candidates if (c / "config.yaml").is_file()), None)
 
 
 class PyannoteDiarizer:
@@ -41,12 +54,14 @@ class PyannoteDiarizer:
             raise DiarizationError("pyannote.audio is not installed") from exc
 
         token = settings.hf_token.get_secret_value() if settings.hf_token else None
-        log.info("Loading diarization pipeline %s", settings.model)
+        local = local_model_dir(settings.model)
+        source = str(local) if local else settings.model
+        log.info("Loading diarization pipeline %s%s", settings.model, " (local copy, offline)" if local else "")
         try:
             try:
-                pipeline = Pipeline.from_pretrained(settings.model, token=token)
+                pipeline = Pipeline.from_pretrained(source, token=None if local else token)
             except TypeError:  # pyannote < 4
-                pipeline = Pipeline.from_pretrained(settings.model, use_auth_token=token)
+                pipeline = Pipeline.from_pretrained(source, use_auth_token=None if local else token)
         except Exception as exc:
             raise DiarizationError(f"Cannot load diarization model {settings.model}: {exc}") from exc
         if pipeline is None:
