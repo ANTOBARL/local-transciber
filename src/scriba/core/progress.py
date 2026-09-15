@@ -1,8 +1,12 @@
 """Transcription progress and time-to-completion estimate.
 
-Progress units come from the real work qwen-asr does (ASR batches, then alignment batches).
-Between units the bar advances smoothly using the measured pace; before the first unit the
-estimate relies on the throughput of previous jobs (local cache).
+The estimate is built only from measured work:
+  - seconds per chunk from the ASR batches already completed,
+  - seconds per chunk of alignment, measured once alignment starts (before that, the
+    alignment/ASR time ratio observed in previous jobs, or a conservative default).
+The bar may advance within the batch currently running, but never by more than that batch,
+so it cannot run ahead of the real work. Before the first batch completes there is no ETA
+unless previous jobs on the same setup provide one.
 """
 
 from __future__ import annotations
@@ -18,7 +22,9 @@ from scriba.utils.logging import get_logger
 
 log = get_logger("progress")
 
-MIN_SECONDS_FOR_HISTORY = 60.0  # short clips are dominated by fixed overhead
+MIN_SECONDS_FOR_HISTORY = 60.0   # short clips are dominated by fixed overhead
+DEFAULT_ALIGN_RATIO = 0.25       # alignment time / ASR time when nothing was measured yet (conservative)
+INFLIGHT_CAP = 0.9               # credit at most 90% of a batch while it is still running
 
 
 def cache_dir() -> Path:
@@ -27,10 +33,11 @@ def cache_dir() -> Path:
 
 
 class ThroughputHistory:
-    """Remembers processing-seconds per audio-second for a given model/device setup."""
+    """Exponential moving averages of measured job metrics, per model/device setup."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or cache_dir() / "throughput.json"
+        self._lock = threading.Lock()
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -38,123 +45,142 @@ class ThroughputHistory:
         except (OSError, ValueError):
             return {}
 
-    def get(self, key: str) -> float | None:
-        entry = self._load().get(key)
-        return float(entry["rate"]) if isinstance(entry, dict) and "rate" in entry else None
+    def entry(self, key: str) -> dict[str, Any]:
+        value = self._load().get(key)
+        return value if isinstance(value, dict) else {}
 
-    def record(self, key: str, processing_seconds: float, audio_seconds: float) -> None:
+    def get(self, key: str, field: str = "rate") -> float | None:
+        value = self.entry(key).get(field)
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def record(self, key: str, processing_seconds: float, audio_seconds: float, **extra: float) -> None:
+        """Store a finished job. `rate` = processing seconds per audio second."""
         if audio_seconds < MIN_SECONDS_FOR_HISTORY or processing_seconds <= 0:
             return
-        rate = processing_seconds / audio_seconds
-        data = self._load()
-        previous = data.get(key, {}).get("rate")
-        # Exponential moving average: adapts to tuning changes without forgetting everything.
-        data[key] = {"rate": rate if previous is None else 0.6 * rate + 0.4 * float(previous),
-                     "updated": time.time()}
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except OSError as exc:
-            log.debug("Cannot write throughput cache: %s", exc)
+        with self._lock:
+            data = self._load()
+            previous = data.get(key, {}) if isinstance(data.get(key), dict) else {}
+            values = {"rate": processing_seconds / audio_seconds, **extra}
+            merged: dict[str, Any] = {}
+            for name, value in values.items():
+                old = previous.get(name)
+                # Moving average: adapts to tuning changes without forgetting everything.
+                merged[name] = value if not isinstance(old, (int, float)) else 0.6 * value + 0.4 * float(old)
+            merged["jobs"] = int(previous.get("jobs", 0)) + 1
+            merged["audio_seconds"] = float(previous.get("audio_seconds", 0.0)) + audio_seconds
+            merged["updated"] = time.time()
+            data[key] = merged
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except OSError as exc:
+                log.debug("Cannot write throughput cache: %s", exc)
+
+
+def real_speed_key(device_name: str | None, batch: int, timestamps: bool) -> str:
+    return f"real|{device_name}|bs={batch}|ts={timestamps}"
 
 
 class TranscriptionProgress:
-    ASR_WEIGHT_WITH_ALIGNMENT = 0.85  # alignment is a single forward pass, much cheaper than generation
+    """Progress of a windowed transcription, driven by events from WindowedRunner.
+
+    Each window runs ASR then alignment on its chunks, so both counters advance together.
+    Time per chunk is measured separately for the two phases; chunks restored from a checkpoint
+    count as done but are excluded from the speed measurement.
+    """
 
     def __init__(self, audio_seconds: float, timestamps: bool, prior_rate: float | None = None,
-                 clock=time.monotonic):
+                 prior_align_ratio: float | None = None, clock=time.monotonic):
         self.audio_seconds = max(audio_seconds, 0.001)
         self.timestamps = timestamps
         self.prior_rate = prior_rate
+        self.align_ratio = prior_align_ratio if prior_align_ratio is not None else DEFAULT_ALIGN_RATIO
         self._clock = clock
         self._lock = threading.Lock()
         self.started = clock()
+        self.finished_at: float | None = None
+        self.total = 0
+        self.window = 1
         self.phase = "asr"
-        self.asr_done = self.asr_total = 0
-        self.align_done = self.align_total = 0
-        self.step = 1
-        self._fraction = 0.0
-        self._fraction_at = self.started
-        self.finished = False
+        self.asr_done = self.align_done = 0
+        self.resumed = 0
+        self.asr_seconds = self.align_seconds = 0.0
+        self.last_event = self.started
 
-    # ------------------------------------------------------------------ updates
-    @property
-    def _asr_weight(self) -> float:
-        return self.ASR_WEIGHT_WITH_ALIGNMENT if self.timestamps else 1.0
-
-    def update(self, phase: str, done: int, total: int, step: int = 1) -> None:
+    # ------------------------------------------------------------------ events
+    def on_event(self, event: str, plan, stats) -> None:
+        now = self._clock()
         with self._lock:
-            self.phase = phase
-            self.step = max(1, step)
-            if phase == "asr":
-                self.asr_done, self.asr_total = done, total
-            else:
-                self.align_done, self.align_total = done, total
-            fraction = self._real_fraction()
-            if fraction > self._fraction:
-                self._fraction, self._fraction_at = fraction, self._clock()
+            self.total = plan.total_chunks
+            self.window = max(1, plan.window)
+            if event == "plan":
+                self.resumed = stats.asr_done
+            self.asr_done, self.align_done = stats.asr_done, stats.align_done
+            self.asr_seconds, self.align_seconds = stats.asr_seconds, stats.align_seconds
+            # What runs next: alignment right after a window's ASR, otherwise the next window's ASR.
+            self.phase = "align" if event == "asr" and self.timestamps else "asr"
+            self.last_event = now
 
     def finish(self) -> None:
         with self._lock:
-            self.finished = True
-            self._fraction, self._fraction_at = 1.0, self._clock()
+            self.finished_at = self._clock()
 
-    def _real_fraction(self) -> float:
-        w = self._asr_weight
-        asr = self.asr_done / self.asr_total if self.asr_total else 0.0
-        align = self.align_done / self.align_total if self.align_total else 0.0
-        return min(1.0, w * asr + (1 - w) * align)
+    # ------------------------------------------------------------------ measurements
+    @property
+    def asr_seconds_per_chunk(self) -> float | None:
+        measured = self.asr_done - self.resumed
+        return self.asr_seconds / measured if measured > 0 and self.asr_seconds > 0 else None
 
-    def _next_boundary(self) -> float:
-        """Fraction reached when the batch currently running completes."""
-        w = self._asr_weight
-        if self.phase == "asr" and self.asr_total:
-            return min(w, w * min(self.asr_total, self.asr_done + self.step) / self.asr_total)
-        if self.align_total:
-            nxt = min(self.align_total, self.align_done + self.step) / self.align_total
-            return min(1.0, w + (1 - w) * nxt)
-        return w if self.phase == "asr" else 1.0
+    @property
+    def align_seconds_per_chunk(self) -> float | None:
+        measured = self.align_done - (self.resumed if self.timestamps else 0)
+        return self.align_seconds / measured if measured > 0 and self.align_seconds > 0 else None
+
+    def measured_align_ratio(self) -> float | None:
+        asr, align = self.asr_seconds_per_chunk, self.align_seconds_per_chunk
+        return align / asr if asr and align else None
 
     # ------------------------------------------------------------------ estimate
-    def estimated_total_seconds(self) -> float | None:
-        prior = self.prior_rate * self.audio_seconds if self.prior_rate else None
-        f = self._fraction
-        if f <= 0:
-            return prior
-        measured = (self._fraction_at - self.started) / f
-        if prior is None:
-            return measured
-        return f * measured + (1 - f) * prior  # trust measurements more as the job advances
+    def _estimate(self, now: float) -> tuple[float, float | None]:
+        asr_spc = self.asr_seconds_per_chunk
+        if asr_spc is None or not self.total:
+            # Nothing measured yet: the bar stays at 0; only previous jobs may provide an ETA.
+            if self.prior_rate:
+                return 0.0, max(0.0, self.prior_rate * self.audio_seconds - (now - self.started))
+            return 0.0, None
+
+        align_spc = 0.0
+        if self.timestamps:
+            align_spc = self.align_seconds_per_chunk or asr_spc * self.align_ratio
+        total_work = self.total * (asr_spc + align_spc)
+        done_work = self.asr_done * asr_spc + self.align_done * align_spc
+
+        # Credit the batch currently running, at most 90% of its expected duration.
+        remaining_in_window = min(self.window, self.total - (self.asr_done if self.phase == "asr" else self.align_done))
+        expected = remaining_in_window * (asr_spc if self.phase == "asr" else align_spc)
+        inflight = min(max(0.0, now - self.last_event), INFLIGHT_CAP * expected)
+
+        fraction = min(0.99, (done_work + inflight) / total_work) if total_work else 0.0
+        return fraction, max(0.0, total_work - done_work - inflight)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            now = self._clock()
-            elapsed = now - self.started
-            real = self._fraction
-            total = self.estimated_total_seconds()
-            if self.finished:
-                shown, eta = 1.0, 0.0
-            elif total:
-                # Smoothly move toward the next batch boundary, never past it.
-                ceiling = max(real, self._next_boundary() - 0.01)
-                shown = max(real, min(elapsed / total, ceiling, 0.99))
-                eta = max(0.0, total - elapsed)
-            else:
-                shown, eta = real, None
+            now = self.finished_at or self._clock()
+            fraction, eta = (1.0, 0.0) if self.finished_at is not None else self._estimate(now)
             return {
                 "phase": self.phase,
-                "fraction": round(shown, 4),
-                "percent": int(shown * 100),
+                "fraction": round(fraction, 4),
+                "percent": int(fraction * 100),
                 "eta_seconds": None if eta is None else round(eta, 1),
-                "elapsed_seconds": round(elapsed, 1),
-                "asr": [self.asr_done, self.asr_total],
-                "align": [self.align_done, self.align_total],
-                "estimated_from_history": real <= 0 and total is not None,
+                "elapsed_seconds": round(now - self.started, 1),
+                "asr": [self.asr_done, self.total],
+                "align": [self.align_done, self.total if self.timestamps else 0],
+                "estimated_from_history": self.asr_seconds_per_chunk is None and eta is not None,
             }
 
 
 def format_eta(seconds: float | None, lang: str = "it") -> str:
-    """Human-friendly remaining time (kept in sync with frontend/src/progress.ts)."""
+    """Human-friendly remaining time (kept in sync with frontend/src/progress.tsx)."""
     it = lang == "it"
     if seconds is None:
         return "stima in corso…" if it else "estimating…"

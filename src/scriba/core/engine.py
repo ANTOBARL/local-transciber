@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import gc
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from scriba.config import ASRSettings
+from scriba.core.windowed import ChunkResult, EventCallback, WindowedRunner
 from scriba.errors import (
     AlignmentError,
     BackendUnavailableError,
@@ -43,6 +43,13 @@ class RawASRResult:
     language: str
     text: str
     tokens: list[AlignedToken] | None = None
+    completed: bool = True
+    processed_seconds: float | None = None  # audio covered when not completed
+    tail_text: str | None = None
+    tail_start: float | None = None
+    notes: list[str] = field(default_factory=list)  # e.g. batch reduced after an out-of-memory
+    asr_batch: int | None = None
+    align_batch: int | None = None
 
 
 @dataclass
@@ -166,6 +173,8 @@ class QwenASREngine:
                     raise ModelLoadError(f"vLLM initialization failed: {exc}") from exc
                 raise ModelLoadError(f"Failed to load {asr.model}: {exc}") from exc
 
+            if backend == "transformers" and device.startswith("cuda"):
+                _cap_cuda_memory(device)
             self._model = model
             self._signature = self._signature_for(asr, with_aligner)
             self._info = LoadedModelInfo(
@@ -179,6 +188,20 @@ class QwenASREngine:
             )
             log.info("Model loaded on %s", self._info.device_name)
             return self._info
+
+    def set_batch_size(self, asr: ASRSettings, batch: int) -> None:
+        """Change the inference batch size of the loaded model without reloading it."""
+        with self._lock:
+            if self._model is None:
+                raise ModelLoadError("Model is not loaded")
+            self._model.max_inference_batch_size = int(batch)
+            updated = asr.model_copy(update={"max_inference_batch_size": int(batch)})
+            self._signature = self._signature_for(updated, asr.timestamps_active)
+
+    def release_cached_memory(self) -> None:
+        """Return PyTorch's cached (unused) VRAM to the driver, keeping the model loaded."""
+        with self._lock:
+            self._free_memory()
 
     def unload(self) -> None:
         with self._lock:
@@ -211,127 +234,92 @@ class QwenASREngine:
         language: str | None = None,
         context: str = "",
         return_timestamps: bool = True,
-        on_unit: UnitCallback | None = None,
+        *,
+        align_batch: int | None = None,
+        on_event: EventCallback | None = None,
+        cancel: CancelToken | None = None,
+        resume: dict[int, ChunkResult] | None = None,
+        save: Callable[[list[ChunkResult]], None] | None = None,
     ) -> RawASRResult:
+        """Transcribe one audio window by window (see scriba.core.windowed).
+
+        `cancel` stops before the next window; `resume` skips chunks already processed; `save` is
+        called after every window. A stopped run returns `completed=False` with all finished chunks.
+        """
+        from qwen_asr.inference.utils import SAMPLE_RATE, merge_languages, normalize_audios
+
         with self._lock:
             if self._model is None:
                 raise ModelLoadError("Model is not loaded")
             if return_timestamps and self._model.forced_aligner is None:
                 raise AlignmentError("Timestamps requested but the forced aligner is not loaded")
+            asr_batch = self._model.max_inference_batch_size
+            asr_batch = 32 if not asr_batch or asr_batch <= 0 else asr_batch
+            runner = WindowedRunner(self._model, asr_batch=asr_batch,
+                                    align_batch=align_batch or max(1, asr_batch // 2))
             try:
-                with instrument_progress(self._model, on_unit):
-                    results = self._model.transcribe(
-                        audio=audio,
-                        context=context or "",
-                        language=language,
-                        return_time_stamps=return_timestamps,
-                    )
+                wav = normalize_audios(audio)[0]  # mono float32 at 16 kHz, same as qwen-asr
+                chunks, completed, stats = runner.run(
+                    wav, language=language, context=context, timestamps=return_timestamps, done=resume,
+                    save=save, on_event=on_event, cancelled=(lambda: cancel is not None and cancel.cancelled),
+                )
             except ScribaError:
                 raise
             except Exception as exc:
                 self._free_memory()
                 if _is_oom(exc):
                     raise OutOfMemoryError(f"Out of memory during transcription: {exc}") from exc
-                if return_timestamps and "align" in repr(exc).lower():
-                    raise AlignmentError(f"Forced alignment failed: {exc}") from exc
                 raise ScribaError(f"Transcription failed: {exc}") from exc
 
-        r = results[0]
         tokens = None
-        if return_timestamps and r.time_stamps is not None:
-            tokens = [
-                AlignedToken(text=str(it.text), start=float(it.start_time), end=float(it.end_time))
-                for it in r.time_stamps.items
-            ]
-        elif return_timestamps:
-            tokens = []
-        return RawASRResult(language=r.language or "", text=r.text or "", tokens=tokens)
+        if return_timestamps:
+            tokens = [AlignedToken(text, start, end) for c in chunks for text, start, end in (c.tokens or [])]
+        processed = (chunks[-1].offset + chunks[-1].duration) if chunks else 0.0
+        return RawASRResult(
+            language=merge_languages([c.language for c in chunks]) if chunks else "",
+            text="".join(c.text for c in chunks),  # qwen-asr joins chunk texts the same way
+            tokens=tokens,
+            completed=completed,
+            processed_seconds=None if completed else round(processed, 3),
+            notes=stats.notes,
+            asr_batch=runner.asr_batch,
+            align_batch=runner.align_batch,
+        )
 
 
-UnitCallback = Callable[[str, int, int, int], None]  # (phase, done, total, batch_size)
+class CancelToken:
+    """Thread-safe cancellation flag checked between windows."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
 
 
-@contextmanager
-def instrument_progress(model: Any, on_unit: UnitCallback | None) -> Iterator[None]:
-    """Count the batches qwen-asr processes, without changing what it computes.
 
-    Wraps, on this instance only and for the duration of one call:
-      - `_infer_asr(contexts, wavs, languages)` → number of chunks to transcribe
-      - the backend `generate` (transformers module or vLLM LLM) → ASR batches done
-      - `forced_aligner.align(audio, text, language)` → alignment batches done
+
+CUDA_MEMORY_FRACTION = 0.94  # keep a little VRAM free for the driver and other processes
+
+
+def _cap_cuda_memory(device: str) -> None:
+    """Make PyTorch raise an out-of-memory error instead of letting the driver spill into system RAM.
+
+    On Windows/WSL2 the NVIDIA driver can silently fall back to shared system memory when VRAM is
+    full, which keeps the GPU "busy" but tens of times slower. With a cap, the windowed runner gets
+    a real OOM and halves the batch for that window instead.
     """
-    if on_unit is None:
-        yield
-        return
-
-    batch = model.max_inference_batch_size
-    state = {"asr_total": 0, "asr_done": 0, "align_done": 0}
-    patched: list[tuple[Any, str, Any]] = []  # (object, attribute, original instance value or _MISSING)
-
-    def patch(obj: Any, name: str, replacement: Any) -> None:
-        patched.append((obj, name, vars(obj).get(name, _MISSING)))
-        setattr(obj, name, replacement)
-
-    def safe_notify(*args: Any) -> None:
-        try:
-            on_unit(*args)
-        except Exception as exc:  # progress must never break a transcription
-            log.debug("Progress callback failed: %s", exc)
-
-    def step(total: int) -> int:
-        return total if batch is None or batch <= 0 else min(batch, total)
-
-    orig_infer = model._infer_asr
-
-    def infer_asr(contexts, wavs, languages):
-        state["asr_total"] = len(wavs)
-        safe_notify("asr", 0, len(wavs), step(len(wavs)))
-        return orig_infer(contexts, wavs, languages)
-
-    backend = model.model
-    orig_generate = backend.generate
-
-    def generate(*args, **kwargs):
-        out = orig_generate(*args, **kwargs)
-        total = state["asr_total"]
-        if args and isinstance(args[0], list):  # vLLM: list of requests
-            n = len(args[0])
-        elif "input_ids" in kwargs:  # transformers
-            n = int(kwargs["input_ids"].shape[0])
-        else:
-            n = step(total)
-        state["asr_done"] = min(total, state["asr_done"] + n)
-        safe_notify("asr", state["asr_done"], total, step(total))
-        return out
-
-    patch(model, "_infer_asr", infer_asr)
-    patch(backend, "generate", generate)
-
-    aligner = model.forced_aligner
-    if aligner is not None:
-        orig_align = aligner.align
-
-        def align(audio, text, language):
-            total = state["asr_total"]
-            if state["align_done"] == 0:
-                safe_notify("align", 0, total, step(total))
-            out = orig_align(audio=audio, text=text, language=language)
-            state["align_done"] = min(total, state["align_done"] + (len(text) if isinstance(text, list) else 1))
-            safe_notify("align", state["align_done"], total, step(total))
-            return out
-
-        patch(aligner, "align", align)
     try:
-        yield
-    finally:
-        for obj, name, original in reversed(patched):
-            if original is _MISSING:
-                vars(obj).pop(name, None)  # class method becomes visible again
-            else:
-                setattr(obj, name, original)
+        import torch
 
-
-_MISSING = object()
+        index = int(device.split(":", 1)[1]) if ":" in device else 0
+        torch.cuda.set_per_process_memory_fraction(CUDA_MEMORY_FRACTION, index)
+    except Exception as exc:  # pragma: no cover
+        log.debug("Cannot cap CUDA memory: %s", exc)
 
 
 def _is_oom(exc: BaseException) -> bool:

@@ -16,10 +16,12 @@ from scriba import __version__
 from scriba.audio.preprocess import load_waveform, to_mono, write_wav
 from scriba.audio.probe import AudioInfo, probe_audio
 from scriba.config import ScribaSettings
-from scriba.core.diarizer import PyannoteDiarizer
-from scriba.core.engine import QwenASREngine
+from scriba.core.diarizer import PyannoteDiarizer, local_model_dir
+from scriba.core.engine import CancelToken, QwenASREngine
+from scriba.core.checkpoint import SegmentStore
+from scriba.core.checkpoint import fingerprint as checkpoint_fingerprint
 from scriba.core.jobs import Job, write_json
-from scriba.core.progress import ThroughputHistory, TranscriptionProgress
+from scriba.core.progress import ThroughputHistory, TranscriptionProgress, real_speed_key
 from scriba.core.speakers import assign_speakers, rename_speakers
 from scriba.core.transcriber import to_transcript
 from scriba.errors import DiarizationError, ScribaError
@@ -42,6 +44,7 @@ STATUS_MESSAGES = {
     JobStatus.DIARIZING: "Diarizing...",
     JobStatus.EXPORTING: "Exporting...",
     JobStatus.COMPLETED: "Done.",
+    JobStatus.CANCELLED: "Stopped by the user: partial transcript saved.",
     JobStatus.FAILED: "Failed.",
 }
 
@@ -70,6 +73,16 @@ class TranscriptionService:
         self.history = ThroughputHistory()
         # Progress of the transcription currently running (or the last one); read by the UIs.
         self.progress: TranscriptionProgress | None = None
+        self._cancel: CancelToken | None = None
+
+    def request_cancel(self) -> bool:
+        """Stop the running transcription after the current batch and export what was processed."""
+        token = self._cancel
+        if token is None or token.cancelled:
+            return False
+        log.info("Stop requested: finishing the current batch")
+        token.cancel()
+        return True
 
     def unload(self) -> None:
         self.engine.unload()
@@ -83,7 +96,12 @@ class TranscriptionService:
     ) -> JobResult:
         audio_path = Path(audio_path)
         started = time.perf_counter()
+        self._cancel = CancelToken()
         info = probe_audio(audio_path)  # fail fast on invalid input, before creating a job dir
+        source_sha = sha256_file(audio_path)
+        fp = checkpoint_fingerprint(sha256=source_sha, settings=settings)
+        resume_dir = (SegmentStore.find_resumable(Path(settings.app.output_root), audio_path, fp)
+                      if settings.app.create_job_subfolder else None)
 
         job = Job(
             settings.app.output_root,
@@ -91,7 +109,9 @@ class TranscriptionService:
             model=settings.asr.model,
             subfolder=settings.app.create_job_subfolder,
             overwrite=settings.app.overwrite,
+            existing_dir=resume_dir,
         )
+        store = SegmentStore(job.dir, fp)
         warnings: list[str] = []
 
         def set_status(status: JobStatus, detail: str | None = None) -> None:
@@ -106,7 +126,7 @@ class TranscriptionService:
             log.info("Source: %s (%.1fs, %s, %s Hz, %s ch)", info.filename, info.duration, info.codec,
                      info.sample_rate, info.channels)
             try:
-                result = self._run(job, audio_path, info, settings, set_status, warnings)
+                result = self._run(job, audio_path, info, settings, set_status, warnings, store, source_sha)
             except Exception as exc:
                 message = exc.user_message() if isinstance(exc, ScribaError) else f"{type(exc).__name__}: {exc}"
                 log.error("Job failed: %s", message, exc_info=not isinstance(exc, ScribaError))
@@ -123,19 +143,25 @@ class TranscriptionService:
         job.record.duration_processing_seconds = round(result.processing_seconds, 2)
         job.record.real_time_factor = round(result.rtf, 4) if result.rtf else None
         job.record.warnings = warnings
-        set_status(JobStatus.COMPLETED)
+        if result.transcript.completed:
+            store.finish()
+        # Give the temporary activation memory back to the GPU: only the model weights stay resident,
+        # so other applications can use the VRAM while Scriba is idle.
+        self.engine.release_cached_memory()
+        self._cancel = None
+        set_status(JobStatus.COMPLETED if result.transcript.completed else JobStatus.CANCELLED)
         return result
 
     # ------------------------------------------------------------------ internals
     def _run(self, job: Job, audio_path: Path, info: AudioInfo, settings: ScribaSettings,
-             set_status: Callable, warnings: list[str]) -> JobResult:
+             set_status: Callable, warnings: list[str], store: "SegmentStore", source_sha: str) -> JobResult:
         asr = settings.asr
         job.record.duration_audio_seconds = info.duration
 
         write_json(job.path("config.json"), settings.to_public_dict())
         write_json(job.path("source.json"), {
             **info.model_dump(),
-            "sha256": sha256_file(audio_path),
+            "sha256": source_sha,
         })
 
         # 1. Preprocess ------------------------------------------------------------
@@ -172,20 +198,44 @@ class TranscriptionService:
             model_info.model, model_info.backend, model_info.device_name, model_info.dtype,
             f"ts={timestamps}", f"bs={asr.max_inference_batch_size}",
         ))
-        tracker = TranscriptionProgress(info.duration, timestamps, prior_rate=self.history.get(history_key))
+        tracker = TranscriptionProgress(info.duration, timestamps, prior_rate=self.history.get(history_key),
+                                        prior_align_ratio=self.history.get(history_key, "align_ratio"))
         self.progress = tracker
         set_status(JobStatus.TRANSCRIBING,
                    "Transcribing and generating timestamps..." if timestamps else None)
+        store.init()
+        resumed = store.load()
+        if resumed:
+            log.info("Resuming job %s: %d chunks already processed", job.id, len(resumed))
+            warnings.append("warn:resumed")
         raw = self.engine.transcribe(asr_input, language=asr.language, context=asr.context,
-                                     return_timestamps=timestamps, on_unit=tracker.update)
+                                     return_timestamps=timestamps, align_batch=asr.align_batch_size or None,
+                                     on_event=tracker.on_event, cancel=self._cancel, resume=resumed,
+                                     save=store.save)
+        for note in raw.notes:
+            warnings.append(note)
         tracker.finish()
         transcribe_seconds = tracker.snapshot()["elapsed_seconds"]
-        self.history.record(history_key, transcribe_seconds, info.duration)
-        log.info("Transcription took %.1fs (%.3f s per audio second)", transcribe_seconds,
-                 transcribe_seconds / max(info.duration, 0.001))
-        job.step("asr", StepStatus.COMPLETED)
-        # qwen-asr runs ASR and forced alignment in a single call.
-        job.step("alignment", StepStatus.COMPLETED if timestamps else StepStatus.SKIPPED)
+        if raw.completed and not resumed:
+            extra = {"speed": info.duration / max(transcribe_seconds, 0.001)}
+            ratio = tracker.measured_align_ratio()
+            if ratio is not None:
+                extra["align_ratio"] = ratio
+            self.history.record(history_key, transcribe_seconds, info.duration, **extra)
+            # Real-world speed for this GPU + batch size, shown next to the optimizer benchmark.
+            self.history.record(real_speed_key(model_info.device_name, asr.max_inference_batch_size, timestamps),
+                                transcribe_seconds, info.duration, **extra)
+            log.info("Transcription took %.1fs (%.3f s per audio second)", transcribe_seconds,
+                     transcribe_seconds / max(info.duration, 0.001))
+        if raw.completed:
+            job.step("asr", StepStatus.COMPLETED)
+            job.step("alignment", StepStatus.COMPLETED if timestamps else StepStatus.SKIPPED)
+        else:
+            covered = raw.processed_seconds or 0.0
+            log.warning("Transcription stopped by the user at %.0fs of %.0fs", covered, info.duration)
+            warnings.append(f"Transcription stopped by the user: {covered:.0f}s of {info.duration:.0f}s processed")
+            job.step("asr", StepStatus.INTERRUPTED)
+            job.step("alignment", StepStatus.INTERRUPTED if timestamps else StepStatus.SKIPPED)
 
         transcript = to_transcript(
             raw,
@@ -201,7 +251,16 @@ class TranscriptionService:
             warnings.append("Forced aligner returned no timestamps")
 
         # 4. Diarization (never fatal) ----------------------------------------------
-        if settings.diarization.enabled:
+        if settings.diarization.enabled and not transcript.completed:
+            job.step("diarization", StepStatus.SKIPPED)
+            warnings.append("warn:diarization_stopped")
+        elif (settings.diarization.enabled and settings.diarization.hf_token is None
+              and local_model_dir(settings.diarization.model) is None):
+            # The pyannote model is gated: without a token the download is refused, don't even try.
+            log.warning("Diarization skipped: no Hugging Face token configured")
+            warnings.append("warn:diarization_no_token")
+            job.step("diarization", StepStatus.SKIPPED)
+        elif settings.diarization.enabled:
             set_status(JobStatus.DIARIZING)
             try:
                 turns = self.diarizer.diarize(waveform, sr, settings.diarization)
@@ -217,7 +276,9 @@ class TranscriptionService:
             except (DiarizationError, Exception) as exc:
                 msg = exc.user_message() if isinstance(exc, ScribaError) else str(exc)
                 log.warning("Diarization failed, continuing without speakers: %s", msg)
-                warnings.append(f"Diarization failed: {msg}")
+                # Short, translatable message for the UI; full details stay in processing.log.
+                warnings.append("warn:diarization_access" if "401" in msg or "gated" in msg.lower()
+                                else "warn:diarization_failed")
                 job.step("diarization", StepStatus.FAILED)
         else:
             job.step("diarization", StepStatus.SKIPPED)

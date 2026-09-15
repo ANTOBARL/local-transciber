@@ -75,11 +75,15 @@ class FakeEngine:
                                         model=asr.model, aligner_model=asr.forced_aligner.model)
         return self.info
 
-    def transcribe(self, audio, language=None, context="", return_timestamps=True, on_unit=None):
+    def set_batch_size(self, asr, batch):
+        self.batch = batch
+
+    def release_cached_memory(self):
+        self.released = getattr(self, "released", 0) + 1
+
+    def transcribe(self, audio, language=None, context="", return_timestamps=True, **kwargs):
         wav, sr = audio
         assert sr == 16000 and wav.ndim == 1
-        if on_unit:
-            on_unit("asr", 1, 1, 1)
         text = "Buongiorno a tutti. Possiamo iniziare."
         tokens = [tok("Buongiorno", 0.1, 0.5), tok("a", 0.5, 0.6), tok("tutti", 0.6, 0.9),
                   tok("Possiamo", 1.5, 1.8), tok("iniziare", 1.8, 1.95)]
@@ -126,7 +130,7 @@ def test_service_end_to_end_with_fake_engine(tmp_path, wav_file):
 
 
 def test_diarization_failure_is_not_fatal(tmp_path, wav_file):
-    settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True}})
+    settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True, "hf_token": "hf_test"}})
     service = TranscriptionService()
     service.engine = FakeEngine()
 
@@ -137,11 +141,11 @@ def test_diarization_failure_is_not_fatal(tmp_path, wav_file):
     service.diarizer = BrokenDiarizer()
     result = service.transcribe(wav_file, settings)
     assert (result.job_dir / "transcript.srt").is_file()
-    assert any("Diarization failed" in w for w in result.warnings)
+    assert "warn:diarization_failed" in result.warnings
 
 
 def test_speaker_rename_regenerates_exports(tmp_path, wav_file):
-    settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True}})
+    settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True, "hf_token": "hf_test"}})
     service = TranscriptionService()
     service.engine = FakeEngine()
 
@@ -167,3 +171,20 @@ def test_failed_job_records_error(tmp_path, wav_file):
         service.transcribe(wav_file, settings)
     job_dir = next(p for p in tmp_path.iterdir() if p.is_dir())
     assert '"status": "failed"' in (job_dir / "job.json").read_text(encoding="utf-8")
+
+
+def test_diarization_without_token_is_skipped_without_network(tmp_path, wav_file, monkeypatch):
+    monkeypatch.delenv("SCRIBA_DIARIZATION__HF_TOKEN", raising=False)
+    settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True}})
+    settings = settings.model_copy(update={"diarization": settings.diarization.model_copy(update={"hf_token": None})})
+    service = TranscriptionService()
+    service.engine = FakeEngine()
+
+    class MustNotRun:
+        def diarize(self, *a, **k):
+            raise AssertionError("diarizer called without token")
+
+    service.diarizer = MustNotRun()
+    result = service.transcribe(wav_file, settings)
+    assert "warn:diarization_no_token" in result.warnings
+
