@@ -64,6 +64,14 @@ class LoadedModelInfo:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+def local_model_source(model: str) -> str:
+    """The local copy of a Qwen model if one is downloaded, else the Hugging Face id."""
+    from scriba.envfile import find_local_model
+
+    local = find_local_model(model, marker="config.json")
+    return str(local) if local else model
+
+
 def resolve_backend(requested: str) -> str:
     ok, reason = dev.vllm_supported()
     if requested == "auto":
@@ -124,6 +132,9 @@ class QwenASREngine:
             if backend == "vllm" and not device.startswith("cuda"):
                 raise DeviceUnavailableError("vLLM backend requires a CUDA device")
 
+            model_source = local_model_source(asr.model)
+            aligner_source = local_model_source(asr.forced_aligner.model) if with_aligner else None
+
             aligner_kwargs = None
             aligner_device = None
             if with_aligner:
@@ -134,9 +145,11 @@ class QwenASREngine:
                 aligner_kwargs = {"dtype": dev.torch_dtype(aligner_dtype), "device_map": aligner_device}
 
             log.info(
-                "Loading %s (backend=%s, device=%s, dtype=%s, aligner=%s)",
-                asr.model, backend, device, dtype_name,
+                "Loading %s%s (backend=%s, device=%s, dtype=%s, aligner=%s%s)",
+                asr.model, " (local copy, offline)" if model_source != asr.model else "",
+                backend, device, dtype_name,
                 asr.forced_aligner.model if with_aligner else "disabled",
+                " (local copy, offline)" if with_aligner and aligner_source != asr.forced_aligner.model else "",
             )
             try:
                 from scriba.compat import ensure_nagisa_importable
@@ -147,7 +160,7 @@ class QwenASREngine:
                 raise ModelLoadError(f"qwen-asr is not importable: {exc}", hint="pip install qwen-asr") from exc
 
             common = dict(
-                forced_aligner=asr.forced_aligner.model if with_aligner else None,
+                forced_aligner=aligner_source if with_aligner else None,
                 forced_aligner_kwargs=aligner_kwargs,
                 max_inference_batch_size=asr.max_inference_batch_size,
                 max_new_tokens=asr.max_new_tokens,
@@ -156,13 +169,13 @@ class QwenASREngine:
                 if backend == "vllm":
                     kwargs = dict(gpu_memory_utilization=asr.gpu_memory_utilization, dtype=dtype_name)
                     kwargs.update(asr.backend_kwargs)
-                    model = Qwen3ASRModel.LLM(model=asr.model, **common, **kwargs)
+                    model = Qwen3ASRModel.LLM(model=model_source, **common, **kwargs)
                 else:
                     kwargs = dict(dtype=dev.torch_dtype(dtype_name), device_map=device)
                     kwargs.update(asr.backend_kwargs)
                     if isinstance(kwargs.get("dtype"), str):
                         kwargs["dtype"] = dev.torch_dtype(kwargs["dtype"])
-                    model = Qwen3ASRModel.from_pretrained(asr.model, **common, **kwargs)
+                    model = Qwen3ASRModel.from_pretrained(model_source, **common, **kwargs)
             except ScribaError:
                 raise
             except Exception as exc:

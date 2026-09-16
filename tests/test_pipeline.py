@@ -175,6 +175,7 @@ def test_failed_job_records_error(tmp_path, wav_file):
 
 def test_diarization_without_token_is_skipped_without_network(tmp_path, wav_file, monkeypatch):
     monkeypatch.delenv("SCRIBA_DIARIZATION__HF_TOKEN", raising=False)
+    monkeypatch.setattr("scriba.core.pipeline.local_model_dir", lambda model: None)
     settings = load_settings(overrides={"app": {"output_root": str(tmp_path)}, "diarization": {"enabled": True}})
     settings = settings.model_copy(update={"diarization": settings.diarization.model_copy(update={"hf_token": None})})
     service = TranscriptionService()

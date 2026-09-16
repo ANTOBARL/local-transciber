@@ -29,6 +29,23 @@ def env_file_path() -> Path:
     return Path.cwd() / ".env"
 
 
+def find_local_model(model: str, marker: str) -> Path | None:
+    """A local copy of a Hugging Face model, usable offline and without a token.
+
+    Looked up, in order: `model` itself as a directory, then `<repo root>/config/models/<org>--<name>`
+    (the documented local convention), then `<config dir>/models/<org>--<name>` (the folder next to the
+    .env file, mounted at /data/config in the container). `marker` is a file expected at the root of a
+    real model directory (e.g. "config.json", "config.yaml").
+    """
+    safe_name = model.replace("/", "--")
+    candidates = [
+        Path(model),
+        project_root() / "config" / "models" / safe_name,
+        env_file_path().parent / "models" / safe_name,
+    ]
+    return next((c for c in candidates if (c / marker).is_file()), None)
+
+
 def env_files_to_read() -> list[Path]:
     """Files read into settings, lowest precedence first."""
     primary = env_file_path()

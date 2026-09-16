@@ -22,15 +22,10 @@ log = get_logger("diarizer")
 
 
 def local_model_dir(model: str) -> Path | None:
-    """A local copy of the pyannote pipeline, usable offline and without a token.
+    """A local copy of the pyannote pipeline, usable offline and without a token."""
+    from scriba.envfile import find_local_model
 
-    Looked up, in order: `model` itself as a directory, then `<config dir>/models/<org>--<name>`
-    (the folder next to the .env file, mounted at /data/config in the container).
-    """
-    from scriba.envfile import env_file_path
-
-    candidates = [Path(model), env_file_path().parent / "models" / model.replace("/", "--")]
-    return next((c for c in candidates if (c / "config.yaml").is_file()), None)
+    return find_local_model(model, marker="config.yaml")
 
 
 class PyannoteDiarizer:

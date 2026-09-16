@@ -26,7 +26,7 @@ log = get_logger("optimizer")
 
 BENCHMARK_AUDIO = Path(__file__).resolve().parents[1] / "assets" / "benchmark_it.opus"
 BENCHMARK_LANGUAGE = "Italian"
-CANDIDATES = (2, 4, 8, 12, 16, 24, 32, 48)
+CANDIDATES = (1, 2, 4, 8, 12, 16, 24, 32, 48)
 CPU_MAX_BATCH = 8
 VRAM_SAFETY = 0.85      # use at most 85% of the VRAM that is free before the benchmark
 MIN_GAIN = 1.05         # stop when a larger batch is <5% faster
@@ -139,6 +139,11 @@ def optimization_status(env_path: Path | None = None) -> dict[str, Any]:
     if match:
         status["applied_at"], status["device"] = match.group(1), match.group(2).strip()
 
+    if status["device"] and status["device"] not in _current_device_names():
+        # Tuned on different hardware (e.g. moved the .env, or a different GPU in this machine):
+        # the saved batch size and VRAM figures don't apply here, so fall back to "not optimized".
+        return {"optimized": False}
+
     # Benchmark table from the comment block: "#    12      48.2    13920 MB  ok"
     rows = [(int(b), float(s), int(v), st) for b, s, v, st in
             re.findall(r"#\s+(\d+)\s+([\d.]+)\s+(\d+) MB\s+(\w+)", text)]
@@ -167,11 +172,19 @@ def optimization_status(env_path: Path | None = None) -> dict[str, Any]:
     return status
 
 
+def _current_device_names() -> set[str]:
+    """Display names of the hardware actually available on this machine right now."""
+    from scriba.utils.device import device_display_name, list_gpus
+
+    gpus = list_gpus()
+    return {g.name for g in gpus} if gpus else {device_display_name("cpu")}
+
+
 def _gpu_total_mb(device_name: str | None) -> int | None:
     from scriba.utils.device import list_gpus
 
     gpus = list_gpus()
-    match = next((g for g in gpus if device_name and g.name == device_name), gpus[0] if gpus else None)
+    match = next((g for g in gpus if device_name and g.name == device_name), None)
     return int(match.total_memory_gb * 1024) if match else None
 
 

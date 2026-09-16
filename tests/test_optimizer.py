@@ -5,7 +5,17 @@ import pytest
 
 from scriba.config import SettingsProvider, load_settings
 from scriba.core.engine import LoadedModelInfo
-from scriba.core.optimizer import BENCHMARK_AUDIO, ENV_KEY_BATCH, InferenceOptimizer
+from scriba.core.optimizer import (
+    BENCHMARK_AUDIO,
+    CANDIDATES,
+    ENV_KEY_BATCH,
+    InferenceOptimizer,
+    OptimizationResult,
+    Trial,
+    apply_result,
+    optimization_status,
+)
+from scriba.utils.device import GPUInfo
 from scriba.envfile import read_managed_block, write_managed_block
 from scriba.errors import OutOfMemoryError
 
@@ -93,3 +103,50 @@ def test_optimizer_fails_when_nothing_works():
     engine = FakeEngine(oom_at=1)
     with pytest.raises(Exception):
         InferenceOptimizer(FakeService(engine), candidates=(2,)).run(load_settings(), write_env=False)
+
+
+def test_candidates_include_batch_one_as_a_safe_fallback():
+    assert CANDIDATES[0] == 1
+
+
+def test_optimizer_falls_back_to_batch_one_instead_of_failing(tmp_path):
+    """If every larger batch fails, batch 1 (always tried first) should be picked instead of erroring."""
+    settings = load_settings()
+    engine = FakeEngine(oom_at=2)
+    env = tmp_path / ".env"
+    result = InferenceOptimizer(FakeService(engine), candidates=(1, 2, 4)).run(settings, env_path=env)
+
+    assert [t.status for t in result.trials] == ["ok", "oom"]
+    assert result.best_batch == 1
+    assert read_managed_block(env) == {ENV_KEY_BATCH: "1"}
+
+
+def _apply_fake_result(env, device: str) -> None:
+    result = OptimizationResult(
+        best_batch=12, previous_batch=8,
+        trials=[Trial(12, "ok", 48.0, 1.0, 48.0, 13920)],
+        device=device, model="Qwen/Qwen3-ASR-1.7B", backend="transformers", dtype="bfloat16",
+        timestamps=True, vram_budget_mb=20000, env_path=None,
+    )
+    apply_result(result, env)
+
+
+def test_optimization_status_matches_current_gpu(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    _apply_fake_result(env, "NVIDIA GeForce RTX 3060 Ti")
+    monkeypatch.setattr("scriba.utils.device.list_gpus",
+                        lambda: [GPUInfo(0, "NVIDIA GeForce RTX 3060 Ti", 8.0, (8, 6), True)])
+
+    status = optimization_status(env)
+    assert status["optimized"] is True
+    assert status["batch"] == 12
+
+
+def test_optimization_status_falls_back_when_gpu_does_not_match(tmp_path, monkeypatch):
+    """A batch tuned on a different GPU (e.g. .env copied from another machine) must not claim to be optimized."""
+    env = tmp_path / ".env"
+    _apply_fake_result(env, "NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr("scriba.utils.device.list_gpus",
+                        lambda: [GPUInfo(0, "NVIDIA GeForce RTX 3060 Ti", 8.0, (8, 6), True)])
+
+    assert optimization_status(env) == {"optimized": False}
