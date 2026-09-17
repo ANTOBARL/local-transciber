@@ -28,6 +28,7 @@ class Segment(BaseModel):
     end: float
     speaker: str | None = None
     words: list[Word] = Field(default_factory=list)
+    kind: str | None = None  # "noise": a time range with only background chatter (no words)
 
 
 class SpeakerTurn(BaseModel):

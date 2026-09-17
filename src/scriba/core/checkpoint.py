@@ -38,6 +38,7 @@ def fingerprint(*, sha256: str, settings: Any) -> dict[str, Any]:
         "context": hashlib.sha256((asr.context or "").encode("utf-8")).hexdigest(),
         "max_new_tokens": asr.max_new_tokens,
         "chunk_seconds": asr.chunk_seconds,
+        "min_confidence": asr.min_confidence,
         "normalize": settings.audio.normalize,
         "sample_rate": settings.audio.sample_rate,
     }

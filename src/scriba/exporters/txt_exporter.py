@@ -13,7 +13,7 @@ def render_txt(transcript: Transcript) -> str:
     else:
         parts = []
         for block in speaker_blocks(transcript):
-            header = f"[{format_clock(block.start)}]"
+            header = f"[{block.clock}]"
             if block.speaker:
                 header += f" {block.speaker}"
             parts.append(f"{header}\n{block.text}")

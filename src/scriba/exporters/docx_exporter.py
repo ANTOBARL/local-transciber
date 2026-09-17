@@ -81,7 +81,7 @@ def render_document_xml(transcript: Transcript) -> str:
         body += [_paragraph(_run(line)) for line in transcript.text.splitlines() if line.strip()] or [_paragraph("")]
     else:
         for block in speaker_blocks(transcript):
-            header = _run(format_clock(block.start), color="6366F1")
+            header = _run(block.clock, color="6366F1")
             if block.speaker:
                 header += _run("  " + block.speaker, bold=True)
             body.append(_paragraph(header, "TurnHeader"))

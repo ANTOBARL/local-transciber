@@ -120,6 +120,9 @@ Every chunk is checked after ASR:
 - **repetition loops** (the same phrase repeated many times) and **dropped speech** (far fewer words per
   second than the rest of the recording) trigger a re-decode of that chunk in shorter pieces;
 - pieces that still loop keep one occurrence of the phrase;
+- pieces where the model recites the context prompt are transcribed again without it;
+- **background chatter** (the model is unsure, `asr.min_confidence`, and hears no language when asked) produces
+  no text: the exports show a `[Brusio di fondo – nessun parlato comprensibile]` section with its time range;
 - the affected time ranges are listed as *Parts to check* in the web apps, in `job.json` (`quality_issues`)
   and in `transcript.json` (`metadata.quality_issues`).
 
@@ -169,6 +172,8 @@ Defaults live in [`src/scriba/default.yaml`](src/scriba/default.yaml). Precedenc
 | `asr.max_inference_batch_size` | `32` | Chunks per window; tune with the optimizer |
 | `asr.align_batch_size` | `0` | `0` = half of the ASR batch |
 | `asr.chunk_seconds` | `30` | Audio piece length sent to the model (5–180) |
+| `asr.min_confidence` | `-0.25` | Mean token log-probability below which a piece may be chatter (`null` = off) |
+| `asr.glossary` | `""` | Proper names, one per line, fixed after transcription (`--glossary-file`) |
 | `asr.gpu_memory_utilization` | `0.70` | vLLM only |
 | `asr.forced_aligner.enabled` | `true` | Required for timestamps, SRT and VTT |
 | `diarization.enabled` | `true` | |

@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 
+from scriba.core.decoding import decode
 from scriba.core.quality import SpeechRate, check_text, collapse_loops, join_chunk_texts, strip_context_echo
 from scriba.utils.logging import get_logger
 
@@ -124,9 +125,10 @@ def _free_cuda() -> None:
 
 class WindowedRunner:
     def __init__(self, model: Any, *, asr_batch: int, align_batch: int, min_batch: int = 1,
-                 chunk_seconds: float | None = None):
+                 chunk_seconds: float | None = None, min_confidence: float | None = None):
         self.model = model
         self.chunk_seconds = chunk_seconds
+        self.min_confidence = min_confidence
         self.asr_batch = max(1, asr_batch)
         self.align_batch = max(1, align_batch)
         self.min_batch = min_batch
@@ -225,8 +227,8 @@ class WindowedRunner:
         t0 = time.perf_counter()
         try:
             with token_budget(self.model, max(plan.durations[i] for i in indexes)):
-                raw = self.model._infer_asr([context or ""] * len(indexes), [wavs[i] for i in indexes],
-                                            [forced] * len(indexes))
+                raw, confidence = decode(self.model, [context or ""] * len(indexes), [wavs[i] for i in indexes],
+                                         [forced] * len(indexes))
         except Exception as exc:
             self._maybe_shrink(exc, "asr", stats)
             raise
@@ -240,7 +242,7 @@ class WindowedRunner:
         reference = self.rates.reference
         for pos, i in enumerate(indexes):
             parsed[pos], issues[i] = self._repair(wavs[i], plan.offsets[i], plan.durations[i], parsed[pos],
-                                                  forced, context, reference)
+                                                  forced, context, reference, confidence[pos])
         self._emit(on_event, "asr", plan, stats)
 
         # ---- alignment, in its own (smaller) batches
@@ -275,8 +277,9 @@ class WindowedRunner:
 
     # ------------------------------------------------------------------ quality repair
     def _repair(self, wav, offset: float, duration: float, parsed: tuple[str, str], forced, context,
-                reference: float | None = None) -> tuple[tuple[str, str], list[dict[str, Any]]]:
-        """Undo a recited context first (re-decoding without it), then fix loops and dropped speech."""
+                reference: float | None = None, confidence: float | None = None
+                ) -> tuple[tuple[str, str], list[dict[str, Any]]]:
+        """Undo a recited context (re-decoding without it), drop chatter, then fix loops and dropped speech."""
         lang, text = parsed
         issues: list[dict[str, Any]] = []
         if context:
@@ -285,7 +288,8 @@ class WindowedRunner:
                 log.warning("Chunk at %.0fs: the model recited the context (%d words), re-decoding without it",
                             offset, echoed)
                 try:
-                    text = self._decode_pieces([(wav, 0.0, duration)], forced, "")[0]
+                    texts, scores = self._decode_scored([(wav, 0.0, duration)], forced, "")
+                    text, confidence = texts[0], scores[0]
                 except Exception as exc:  # best effort: drop the recited words
                     if _is_oom(exc):
                         _free_cuda()
@@ -293,8 +297,29 @@ class WindowedRunner:
                     text = strip_context_echo(text, context)[0]
                 context = ""
                 issues.append(_issue("context", offset, duration, "redecoded", echoed))
+        if self._unsure(confidence) and text.strip() and self._hears_no_language(wav, duration):
+            log.info("Chunk at %.0fs: background chatter (confidence %.2f), no text kept", offset, confidence)
+            return (lang, ""), issues + [_issue("noise", offset, duration, "removed", len(text.split()))]
         repaired, more = self._repair_text(wav, offset, duration, (lang, text), forced, context, reference)
         return repaired, issues + more
+
+    def _unsure(self, confidence: float | None) -> bool:
+        return self.min_confidence is not None and confidence is not None and confidence < self.min_confidence
+
+    def _hears_no_language(self, wav, duration: float) -> bool:
+        """Low confidence also happens on real but noisy speech (audience questions), where the model still
+        recognises the language; over room chatter it usually answers "language None"."""
+        from qwen_asr.inference.utils import parse_asr_output
+
+        try:
+            with token_budget(self.model, duration):
+                raw, _ = decode(self.model, [""], [wav], [None])
+        except Exception as exc:  # when in doubt, keep the text
+            if _is_oom(exc):
+                _free_cuda()
+            log.warning("Language check failed: %s", exc)
+            return False
+        return not parse_asr_output(raw[0])[0]
 
     def _repair_text(self, wav, offset: float, duration: float, parsed: tuple[str, str], forced, context,
                      reference: float | None = None) -> tuple[tuple[str, str], list[dict[str, Any]]]:
@@ -353,19 +378,22 @@ class WindowedRunner:
         return (lang, join_chunk_texts(texts)), issues
 
     def _decode_pieces(self, pieces, forced, context) -> list[str]:
+        return self._decode_scored(pieces, forced, context)[0]
+
+    def _decode_scored(self, pieces, forced, context) -> tuple[list[str], list[float | None]]:
         from qwen_asr.inference.utils import parse_asr_output
 
         with token_budget(self.model, max(p[2] for p in pieces)):
-            raw = self.model._infer_asr([context or ""] * len(pieces), [p[0] for p in pieces],
-                                        [forced] * len(pieces))
+            raw, scores = decode(self.model, [context or ""] * len(pieces), [p[0] for p in pieces],
+                                 [forced] * len(pieces))
         texts = [parse_asr_output(out, user_language=forced)[1] for out in raw]
         # Short, quiet pieces are where the model most often recites the context: redo those without it.
         echoed = [k for k, text in enumerate(texts) if context and strip_context_echo(text, context)[1]]
         if echoed:
-            again = self._decode_pieces([pieces[k] for k in echoed], forced, "")
-            for k, text in zip(echoed, again):
-                texts[k] = text
-        return texts
+            again, again_scores = self._decode_scored([pieces[k] for k in echoed], forced, "")
+            for k, text, score in zip(echoed, again, again_scores):
+                texts[k], scores[k] = text, score
+        return texts, list(scores)
 
     def _maybe_shrink(self, exc: BaseException, phase: str, stats: WindowStats) -> None:
         """On out-of-memory, halve the batch of the failing phase and ask for a retry."""
@@ -400,23 +428,29 @@ class _RetryWindow(Exception):
 
 
 def merge_issues(issues: list[dict[str, Any]], gap: float = 1.0) -> list[dict[str, Any]]:
-    """Join consecutive ranges with the same problem (a long pause spans many chunks)."""
+    """Join consecutive ranges with the same problem (a long pause spans many chunks).
+
+    Ranges are merged per kind and action, so a chunk reported twice (e.g. recited context, then
+    chatter) does not split the chatter section around it.
+    """
+    open_ranges: dict[tuple, dict[str, Any]] = {}
     merged: list[dict[str, Any]] = []
     for issue in sorted(issues, key=lambda i: i.get("start", 0.0)):
-        last = merged[-1] if merged else None
-        if (last is not None and last.get("kind") == issue.get("kind") and last.get("action") == issue.get("action")
-                and issue.get("start", 0.0) - last.get("end", 0.0) <= gap):
+        key = (issue.get("kind"), issue.get("action"))
+        last = open_ranges.get(key)
+        if last is not None and issue.get("start", 0.0) - last.get("end", 0.0) <= gap:
             last["end"] = max(last["end"], issue["end"])
             last["words_removed"] = last.get("words_removed", 0) + issue.get("words_removed", 0)
         else:
-            merged.append(dict(issue))
+            open_ranges[key] = dict(issue)
+            merged.append(open_ranges[key])
     return merged
 
 
 def _issue(kind: str, start: float, duration: float, action: str, words_removed: int = 0) -> dict[str, Any]:
     """A time range worth checking by hand.
 
-    kind: repetition | sparse | context; action: redecoded | collapsed | kept.
+    kind: repetition | sparse | context | noise; action: redecoded | collapsed | kept | removed.
     """
     return {"kind": kind, "start": round(start, 2), "end": round(start + duration, 2), "action": action,
             "words_removed": words_removed}

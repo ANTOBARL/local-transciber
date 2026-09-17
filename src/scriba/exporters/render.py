@@ -25,6 +25,16 @@ class Block:
     end: float
     speaker: str | None
     text: str
+    kind: str | None = None  # "noise": a background-chatter section
+
+    @property
+    def clock(self) -> str:
+        """Start time; noise sections show their whole range."""
+        from scriba.utils.time import format_clock
+
+        if self.kind:
+            return f"{format_clock(self.start)} – {format_clock(self.end)}"
+        return format_clock(self.start)
 
 
 def speaker_blocks(transcript: Transcript, max_block_seconds: float = 60.0) -> list[Block]:
@@ -35,8 +45,11 @@ def speaker_blocks(transcript: Transcript, max_block_seconds: float = 60.0) -> l
     blocks: list[Block] = []
     for seg in transcript.segments:
         label = transcript.speaker_label(seg.speaker)
-        if (
+        if seg.kind:
+            blocks.append(Block(start=seg.start, end=seg.end, speaker=None, text=seg.text, kind=seg.kind))
+        elif (
             blocks
+            and blocks[-1].kind is None
             and blocks[-1].speaker == label
             and (label is not None or seg.end - blocks[-1].start <= max_block_seconds)
         ):

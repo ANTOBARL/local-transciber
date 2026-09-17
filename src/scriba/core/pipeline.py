@@ -22,6 +22,7 @@ from scriba.core.checkpoint import SegmentStore
 from scriba.core.checkpoint import fingerprint as checkpoint_fingerprint
 from scriba.core.jobs import Job, write_json
 from scriba.core.progress import ThroughputHistory, TranscriptionProgress, real_speed_key
+from scriba.core.quality import add_noise_markers
 from scriba.core.speakers import assign_speakers, rename_speakers
 from scriba.core.transcriber import to_transcript
 from scriba.core.vocabulary import CONTEXT_WARN_CHARS, Glossary, context_slowdown
@@ -217,7 +218,7 @@ class TranscriptionService:
             warnings.append("warn:resumed")
         raw = self.engine.transcribe(asr_input, language=asr.language, context=asr.context,
                                      return_timestamps=timestamps, align_batch=asr.align_batch_size or None,
-                                     chunk_seconds=asr.chunk_seconds,
+                                     chunk_seconds=asr.chunk_seconds, min_confidence=asr.min_confidence,
                                      on_event=tracker.on_event, cancel=self._cancel, resume=resumed,
                                      save=store.save)
         for note in raw.notes:
@@ -306,6 +307,8 @@ class TranscriptionService:
                 job.step("diarization", StepStatus.FAILED)
         else:
             job.step("diarization", StepStatus.SKIPPED)
+
+        transcript = add_noise_markers(transcript, quality)
 
         # 5. Export --------------------------------------------------------------------
         set_status(JobStatus.EXPORTING)

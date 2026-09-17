@@ -61,6 +61,9 @@ class ASRSettings(BaseModel):
     # Audio is transcribed in pieces of at most this length. Long pieces (the 180 s maximum allowed by the
     # aligner) make Qwen3-ASR drop speech or loop on real recordings; 30 s pieces are faster and complete.
     chunk_seconds: float = Field(30.0, ge=5, le=180)
+    # Pieces whose mean token log-probability is below this are treated as background chatter and left
+    # out of the transcript (clear speech scores about -0.1). None disables the filter.
+    min_confidence: float | None = Field(-0.25, le=0)
 
     return_timestamps: bool = True
     forced_aligner: ForcedAlignerSettings = ForcedAlignerSettings()

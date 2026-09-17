@@ -20,6 +20,8 @@ import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from scriba.models import Segment, Transcript
+
 MAX_NGRAM = 12                # longest repeated phrase looked for, in words
 MIN_LOOP_REPEATS = 5          # consecutive repetitions...
 MIN_LOOP_WORDS = 20           # ...covering at least this many words ("del del del" is normal speech)
@@ -167,6 +169,23 @@ def strip_context_echo(text: str, context: str) -> tuple[str, int]:
         i = max(j, i + 1)
     removed = len(words) - len(kept)
     return (" ".join(kept), removed) if removed else (text, 0)
+
+
+NOISE_MARKER = "[Brusio di fondo – nessun parlato comprensibile]"
+MIN_NOISE_SECTION_SECONDS = 20.0
+
+
+def add_noise_markers(transcript: Transcript, issues: list[dict]) -> Transcript:
+    """Insert a marker segment for every stretch that held only background chatter."""
+    ranges = [(i["start"], i["end"]) for i in issues
+              if i.get("kind") == "noise" and i.get("action") == "removed"
+              and i["end"] - i["start"] >= MIN_NOISE_SECTION_SECONDS]
+    if not ranges:
+        return transcript
+    markers = [Segment(text=NOISE_MARKER, start=start, end=end, kind="noise") for start, end in ranges]
+    result = transcript.model_copy(deep=True)
+    result.segments = sorted(result.segments + markers, key=lambda s: s.start)
+    return result
 
 
 def join_chunk_texts(texts: Iterable[str]) -> str:

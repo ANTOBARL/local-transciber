@@ -252,6 +252,7 @@ class QwenASREngine:
         *,
         align_batch: int | None = None,
         chunk_seconds: float | None = None,
+        min_confidence: float | None = None,
         on_event: EventCallback | None = None,
         cancel: CancelToken | None = None,
         resume: dict[int, ChunkResult] | None = None,
@@ -273,7 +274,7 @@ class QwenASREngine:
             asr_batch = 32 if not asr_batch or asr_batch <= 0 else asr_batch
             runner = WindowedRunner(self._model, asr_batch=asr_batch,
                                     align_batch=align_batch or max(1, asr_batch // 2),
-                                    chunk_seconds=chunk_seconds)
+                                    chunk_seconds=chunk_seconds, min_confidence=min_confidence)
             try:
                 wav = normalize_audios(audio)[0]  # mono float32 at 16 kHz, same as qwen-asr
                 chunks, completed, stats = runner.run(

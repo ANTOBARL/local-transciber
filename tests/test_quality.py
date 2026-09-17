@@ -164,6 +164,10 @@ def test_pauses_spanning_chunks_are_reported_once():
         {"kind": "sparse", "start": 0.0, "end": 90.0, "action": "kept", "words_removed": 0},
         {"kind": "repetition", "start": 90.0, "end": 100.0, "action": "collapsed", "words_removed": 5},
     ]
+    chatter = [{"kind": k, "start": s, "end": s + 30.0, "action": a, "words_removed": 1}
+               for s in (0.0, 30.0, 60.0) for k, a in (("context", "redecoded"), ("noise", "removed"))]
+    assert [(i["kind"], i["start"], i["end"]) for i in merge_issues(chatter)] == [
+        ("context", 0.0, 90.0), ("noise", 0.0, 90.0)]
 
 
 def test_generation_limit_follows_audio_length(monkeypatch):
@@ -245,6 +249,72 @@ def test_pieces_reciting_the_context_are_decoded_again_without_it(monkeypatch):
         np.zeros(10), language="Italian", context=CONTEXT, timestamps=False)
     assert chunks[0].text == "prima parte del discorso seconda parte del discorso"
     assert calls == [(CONTEXT, 1), (CONTEXT, 2), ("", 1)]
+
+
+def _scored_runner(monkeypatch, chunk_scores, hears_language, min_confidence=-0.25):
+    """A runner whose decoder returns fixed confidences and a fixed answer to the language check."""
+    import scriba.core.windowed as windowed
+
+    filler = " ".join(f"parola{j}" for j in range(39))
+
+    def fake_decode(model, contexts, wavs, languages):
+        if languages[0] is None:  # language check
+            return ["language Italian<asr_text>qualcosa" if hears_language else "language None<asr_text>"], [None]
+        return [f"chiacchiere{int(w[0])} {filler}" for w in wavs], [chunk_scores[int(w[0])] for w in wavs]
+
+    def split(wav, timestamps, max_seconds=None):
+        n = len(chunk_scores)
+        return ([np.full(16000, float(k), dtype=np.float32) for k in range(n)],
+                WindowPlan(n, 0, [30.0 * k for k in range(n)], [30.0] * n))
+
+    monkeypatch.setattr(windowed, "decode", fake_decode)
+    monkeypatch.setattr(WindowedRunner, "split", staticmethod(split))
+    runner = WindowedRunner(object(), asr_batch=4, align_batch=4, min_confidence=min_confidence)
+    return runner.run(np.zeros(10), language="Italian", context="", timestamps=False)[0]
+
+
+def test_confident_chunks_are_left_alone(monkeypatch):
+    chunks = _scored_runner(monkeypatch, [-0.1], hears_language=False)
+    assert chunks[0].text.startswith("chiacchiere0") and chunks[0].issues == []
+
+
+def test_chatter_without_language_produces_no_text(monkeypatch):
+    chunks = _scored_runner(monkeypatch, [-0.6, -0.1], hears_language=False)
+    assert chunks[0].text == "" and chunks[1].text.startswith("chiacchiere1")
+    issue, = chunks[0].issues
+    assert (issue["kind"], issue["action"], issue["words_removed"]) == ("noise", "removed", 40)
+
+
+def test_noisy_but_real_speech_is_kept(monkeypatch):
+    chunks = _scored_runner(monkeypatch, [-0.4], hears_language=True)
+    assert chunks[0].text.startswith("chiacchiere0") and chunks[0].issues == []
+
+
+def test_filter_can_be_disabled(monkeypatch):
+    chunks = _scored_runner(monkeypatch, [-0.6], hears_language=False, min_confidence=None)
+    assert chunks[0].text.startswith("chiacchiere0") and chunks[0].issues == []
+
+
+def test_chatter_sections_appear_in_the_exports():
+    from scriba.core.quality import NOISE_MARKER, add_noise_markers
+    from scriba.exporters.srt_exporter import render_srt
+    from scriba.exporters.txt_exporter import render_txt
+
+    words = [Word(text="Buongiorno", start=720.0, end=720.5, speaker="A"), Word(text="a tutti.", start=720.6, end=721.0,
+                                                                                speaker="A")]
+    transcript = Transcript(id="t", source_file="x", language="Italian", duration=800, model="m",
+                            created_at="2026-01-01T00:00:00Z", text="Buongiorno a tutti.", has_timestamps=True,
+                            speakers=["A"],
+                            segments=[Segment(text="Buongiorno a tutti.", start=720.0, end=721.0, speaker="A",
+                                              words=words)])
+    issues = [{"kind": "noise", "action": "removed", "start": 0.0, "end": 718.0, "words_removed": 900},
+              {"kind": "noise", "action": "removed", "start": 760.0, "end": 770.0, "words_removed": 3},  # too short
+              {"kind": "noise", "action": "filtered", "start": 780.0, "end": 810.0, "words_removed": 9}]
+    marked = add_noise_markers(transcript, issues)
+    assert [s.kind for s in marked.segments] == ["noise", None]
+    assert render_txt(marked) == f"[00:00:00 – 00:11:58]\n{NOISE_MARKER}\n\n[00:12:00] A\nBuongiorno a tutti.\n"
+    assert f"00:00:00,000 --> 00:11:58,000\n{NOISE_MARKER}" in render_srt(marked)
+    assert add_noise_markers(transcript, []) is transcript
 
 
 def test_chunk_issues_survive_checkpoints():

@@ -28,7 +28,7 @@ def render_markdown(transcript: Transcript) -> str:
         lines.append(transcript.text.strip())
     else:
         for block in speaker_blocks(transcript):
-            header = f"`{format_clock(block.start)}`"
+            header = f"`{block.clock}`"
             if block.speaker:
                 header += f" **{block.speaker}**"
             lines += [header, "", block.text, ""]
