@@ -50,7 +50,8 @@ def test_resumed_chunks_count_as_done_but_not_as_speed():
     clock = FakeClock()
     p = TranscriptionProgress(audio_seconds=13368, timestamps=True, clock=clock)
     p.on_event("plan", plan(), stats(asr_done=48, align_done=48))
-    assert p.snapshot()["percent"] == 0 and p.snapshot()["eta_seconds"] is None  # nothing measured yet
+    snap = p.snapshot()
+    assert snap["percent"] == 64 and snap["eta_seconds"] is None  # 48/75 already done, no speed measured yet
     clock.now = 300.0
     p.on_event("window", plan(), stats(asr_done=60, align_done=60, asr_seconds=240, align_seconds=60))
     assert abs(p.snapshot()["eta_seconds"] - 15 * 25) < 1  # 20 + 5 s/chunk from the 12 new chunks only
@@ -80,3 +81,12 @@ def test_format_eta():
     assert format_eta(5, "en") == "almost done"
     assert format_eta(125) == "circa 2 min 00 s rimanenti" or format_eta(125) == "circa 2 min rimanenti"
     assert format_eta(4000, "en") == "about 1 h 06 min left"
+
+
+def test_resumed_job_with_history_shows_done_share_and_remaining_eta():
+    clock = FakeClock()
+    p = TranscriptionProgress(audio_seconds=13368, timestamps=True, prior_rate=0.1, clock=clock)
+    p.on_event("plan", plan(), stats(asr_done=24, align_done=24))
+    snap = p.snapshot()
+    assert snap["percent"] == 32
+    assert abs(snap["eta_seconds"] - 0.1 * 13368 * (1 - 24 / 75)) < 1

@@ -33,6 +33,7 @@ import { ApiError, api, clock, type Config, type Form, type I18n, type TaskStatu
 import { OptimizePanel } from "./OptimizePanel";
 import { ProgressBar } from "./progress";
 import { QueueList } from "./QueueList";
+import { RecordingPicker } from "./RecordingPicker";
 import { isActive, itemStatus, useQueue } from "./queue";
 
 const FORMATS: Record<string, { label: string; icon: LucideIcon }> = {
@@ -186,19 +187,23 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
     if (file) set("context", (await file.text()).trim());
   };
 
-  // Follow the queue: when the job being watched finishes, show the next one that starts.
-  const runningId = queue.items.find((it) => itemStatus(it) === "running")?.id ?? null;
-  const previousRunning = useRef<string | null>(null);
+  // Follow the queue: when the job being watched finishes, show the next one. Queued jobs count too,
+  // otherwise a short job that goes from queued to done between two polls would never be shown.
+  const followId =
+    queue.items.find((it) => itemStatus(it) === "running")?.id ??
+    queue.items.find((it) => itemStatus(it) === "queued")?.id ??
+    null;
+  const previousFollow = useRef<string | null>(null);
   useEffect(() => {
-    if (runningId && runningId !== selectedId) {
+    if (followId && followId !== selectedId) {
       const watching = selected ? itemStatus(selected) : null;
-      if (!selected || selectedId === previousRunning.current || watching === "queued" || watching === "ready") {
-        setSelectedId(runningId);
+      if (!selected || selectedId === previousFollow.current || watching === "queued" || watching === "ready") {
+        setSelectedId(followId);
       }
     }
-    previousRunning.current = runningId;
+    previousFollow.current = followId;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runningId]);
+  }, [followId]);
 
   useEffect(() => {
     if (!running) return;
@@ -249,6 +254,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
   useEffect(() => {
     if (task?.state === "done") setNames(task.speaker_names ?? {});
   }, [task?.state, task?.speaker_names]);
+  useEffect(() => setRenameMsg(null), [selectedId]);
 
   const applyNames = async () => {
     if (!taskId || !selected) return;
@@ -596,6 +602,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
 
         {/* ---------------------------------------------------------- right column */}
         <section className="col col-right">
+          <RecordingPicker items={queue.items} selectedId={selectedId} onSelect={setSelectedId} t={t} />
           <div className="card status-card">
             <div className={`status ${status.state}`}>
               <StatusIcon state={status.state} />

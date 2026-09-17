@@ -141,13 +141,23 @@ class TranscriptionProgress:
         return align / asr if asr and align else None
 
     # ------------------------------------------------------------------ estimate
+    def _chunk_fraction(self) -> float:
+        """Share of work done judged by chunk counts alone, alignment weighted by the expected ratio."""
+        if not self.total:
+            return 0.0
+        weight = self.align_ratio if self.timestamps else 0.0
+        done = self.asr_done + self.align_done * weight
+        return min(0.99, done / (self.total * (1 + weight)))
+
     def _estimate(self, now: float) -> tuple[float, float | None]:
         asr_spc = self.asr_seconds_per_chunk
         if asr_spc is None or not self.total:
-            # Nothing measured yet: the bar stays at 0; only previous jobs may provide an ETA.
+            # Nothing measured yet (e.g. a resumed job before its first new window): the bar shows the
+            # chunks already done; only previous jobs may provide an ETA.
+            fraction = self._chunk_fraction()
             if self.prior_rate:
-                return 0.0, max(0.0, self.prior_rate * self.audio_seconds - (now - self.started))
-            return 0.0, None
+                return fraction, max(0.0, self.prior_rate * self.audio_seconds * (1 - fraction) - (now - self.started))
+            return fraction, None
 
         align_spc = 0.0
         if self.timestamps:
