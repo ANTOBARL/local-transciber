@@ -16,6 +16,9 @@ from scriba.models import Segment, Word
 
 _SENTENCE_END = re.compile(r"[.!?…。！？]['\"”»)]*$")
 _CLAUSE_END = re.compile(r"[,;:，；：]$")
+# Where the aligner cannot match text and audio it stretches one word over many seconds; such a word
+# would split segments and overlap several speakers.
+MAX_WORD_SECONDS = 3.0
 
 
 def _is_kept(ch: str) -> bool:
@@ -117,6 +120,7 @@ def _enforce_monotonic(words: list[Word]) -> None:
             w.start = last_end
         if w.end < w.start:
             w.end = w.start
+        w.end = min(w.end, w.start + MAX_WORD_SECONDS)
         last_end = w.end
 
 

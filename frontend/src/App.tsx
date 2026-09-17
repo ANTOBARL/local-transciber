@@ -32,6 +32,7 @@ import {
 import { ApiError, api, clock, type Config, type Form, type I18n, type TaskStatus } from "./api";
 import { OptimizePanel } from "./OptimizePanel";
 import { ProgressBar } from "./progress";
+import { QualityList } from "./QualityList";
 import { QueueList } from "./QueueList";
 import { RecordingPicker } from "./RecordingPicker";
 import { isActive, itemStatus, useQueue } from "./queue";
@@ -623,6 +624,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
                 {task.warnings.map((w) => (
                   <div key={w}>{w.startsWith("warn:") ? t(w.slice(5)) : w}</div>
                 ))}
+                {task.quality?.length ? <QualityList issues={task.quality} t={t} /> : null}
               </div>
             </div>
           ) : null}

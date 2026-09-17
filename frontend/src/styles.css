@@ -74,6 +74,9 @@ body {
 .alert-hint { color: var(--muted); font-size: 0.9rem; }
 .alert details { margin-top: 0.45rem; font-size: 0.85rem; }
 .alert summary { cursor: pointer; color: var(--muted); }
+.quality ul { margin: 0.35rem 0 0; padding-left: 1.1rem; max-height: 12rem; overflow-y: auto; }
+.quality li { margin: 0.15rem 0; }
+.quality .mono { font-variant-numeric: tabular-nums; }
 .alert code, .boot code {
   display: block; margin-top: 0.35rem; padding: 0.5rem 0.65rem; border-radius: 8px; background: var(--panel);
   font-family: ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-word;

@@ -54,7 +54,7 @@ class FakeQwen:
 def fake_split(monkeypatch):
     """Six contiguous 10-second chunks whose first sample encodes the chunk index."""
 
-    def split(wav, timestamps):
+    def split(wav, timestamps, max_seconds=None):
         wavs = [np.full(16000, float(i), dtype=np.float32) for i in range(6)]
         offsets = [i * CHUNK_SECONDS for i in range(6)]
         return wavs, WindowPlan(total_chunks=6, window=0, offsets=offsets, durations=[CHUNK_SECONDS] * 6)

@@ -57,6 +57,9 @@ class ASRSettings(BaseModel):
     max_inference_batch_size: int = Field(32, ge=-1)
     align_batch_size: int = Field(0, ge=0)  # 0 = automatic (half of the ASR batch); alignment needs more memory
     max_new_tokens: int = Field(4096, ge=1)
+    # Audio is transcribed in pieces of at most this length. Long pieces (the 180 s maximum allowed by the
+    # aligner) make Qwen3-ASR drop speech or loop on real recordings; 30 s pieces are faster and complete.
+    chunk_seconds: float = Field(30.0, ge=5, le=180)
 
     return_timestamps: bool = True
     forced_aligner: ForcedAlignerSettings = ForcedAlignerSettings()
@@ -86,6 +89,9 @@ class DiarizationSettings(BaseModel):
     num_speakers: int | None = Field(None, ge=1)
     min_speakers: int | None = Field(None, ge=1)
     max_speakers: int | None = Field(None, ge=1)
+    min_turn_seconds: float = Field(0.5, ge=0)          # shorter speaker turns are ignored
+    min_speaker_run_seconds: float = Field(1.0, ge=0)   # shorter speaker changes inside speech are undone
+    sentence_majority: float = Field(0.7, ge=0, le=1)   # a sentence goes to a speaker holding this share of words
 
     @model_validator(mode="after")
     def _check_bounds(self) -> "DiarizationSettings":

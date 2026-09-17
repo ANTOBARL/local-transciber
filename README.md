@@ -103,13 +103,25 @@ current window and exports the partial transcript; a second `Ctrl+C` exits immed
 
 ## Long recordings
 
-Audio is split with qwen-asr's own low-energy boundaries (≤ 3 minutes per chunk with timestamps). Chunks
-are processed in windows: ASR → alignment → saved to `segments/` → memory released. As a result:
+Audio is split at low-energy points into chunks of at most `asr.chunk_seconds` (30 s by default). Longer
+chunks (up to the aligner's 180 s limit) are allowed, but on real recordings they make Qwen3-ASR silently drop
+speech or loop on a phrase; on a 3 h 42 min seminar, 30 s chunks recovered about 27% more text in half the
+time. Chunks are processed in windows: ASR → alignment → saved to `segments/` → memory released. As a result:
 
 - peak VRAM depends on the window size, not on the recording length;
 - alignment uses its own, smaller batch (`asr.align_batch_size`, automatic by default);
 - on a CUDA out-of-memory error the batch is halved and only that window is retried;
 - running the same file again with the same settings resumes from the first unsaved window.
+
+### Quality checks
+
+Every chunk is checked after ASR:
+
+- **repetition loops** (the same phrase repeated many times) and **dropped speech** (far fewer words per
+  second than the rest of the recording) trigger a re-decode of that chunk in shorter pieces;
+- pieces that still loop keep one occurrence of the phrase;
+- the affected time ranges are listed as *Parts to check* in the web apps, in `job.json` (`quality_issues`)
+  and in `transcript.json` (`metadata.quality_issues`).
 
 ## Optimization
 
@@ -156,9 +168,13 @@ Defaults live in [`src/scriba/default.yaml`](src/scriba/default.yaml). Precedenc
 | `asr.language` | `Italian` | `auto` for detection |
 | `asr.max_inference_batch_size` | `32` | Chunks per window; tune with the optimizer |
 | `asr.align_batch_size` | `0` | `0` = half of the ASR batch |
+| `asr.chunk_seconds` | `30` | Audio piece length sent to the model (5–180) |
 | `asr.gpu_memory_utilization` | `0.70` | vLLM only |
 | `asr.forced_aligner.enabled` | `true` | Required for timestamps, SRT and VTT |
 | `diarization.enabled` | `true` | |
+| `diarization.min_turn_seconds` | `0.5` | Shorter speaker turns are ignored |
+| `diarization.min_speaker_run_seconds` | `1.0` | Shorter speaker changes inside a sentence are undone |
+| `diarization.sentence_majority` | `0.7` | A sentence goes to the speaker holding this share of its words (`0` = off) |
 | `export.docx` | `false` | Word export |
 | `app.output_root` | `./outputs` | |
 

@@ -253,6 +253,7 @@ def create_app(base: ScribaSettings | SettingsProvider, service: Any = None, fro
                 "job_id": r.job_id,
                 "completed": r.transcript.completed,
                 "processed_seconds": r.transcript.processed_seconds,
+                "quality": r.quality,
             })
         return payload
 

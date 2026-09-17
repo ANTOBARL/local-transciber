@@ -151,6 +151,19 @@ _ICON_WARN = ('<svg viewBox="0 0 24 24" width="20" height="20" fill="none" strok
               '4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></svg>')
 
 
+def quality_html(lang: str, issues: list[dict]) -> str:
+    """Time ranges to check by hand, one per line (same content as the React app)."""
+    if not issues:
+        return ""
+    lines = ""
+    for q in issues:
+        label = t(lang, "quality_{}_{}".format(q["kind"], q["action"])).replace("{words}", str(q["words_removed"]))
+        lines += (f"<li><code>{format_clock(q['start'])}–{format_clock(q['end'])}</code> "
+                  f"{html.escape(label)}</li>")
+    return (f'<div class="scriba-alert warn"><div><strong>{html.escape(t(lang, "quality_title"))}</strong>'
+            f'<ul style="margin:.3rem 0 0;padding-left:1.1rem">{lines}</ul></div></div>')
+
+
 def alert_html(title: str, message: str, detail: str | None = None, kind: str = "error",
                detail_label: str = "Details") -> str:
     """Prominent error/warning box (same look as the React frontend)."""
@@ -659,7 +672,7 @@ def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, 
                 downloads=_download_copies(result.files, result.job_id),
                 output_folder=str(result.job_dir),
                 warnings="".join(alert_html(t(lang, w[5:]) if w.startswith("warn:") else w, "", kind="warn")
-                                 for w in result.warnings),
+                                 for w in result.warnings) + quality_html(lang, result.quality),
                 speakers_hint=gr.Markdown(visible=not has_speakers),
                 rename_group=gr.Column(visible=has_speakers),
                 speaker_table=[[s, ""] for s in transcript.speakers] if has_speakers else [],

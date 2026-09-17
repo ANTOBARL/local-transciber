@@ -30,7 +30,7 @@ from scriba.models import JobStatus, StepStatus, Transcript
 from scriba.utils.device import runtime_versions
 from scriba.utils.logging import get_logger, job_log_file
 from scriba.utils.paths import sha256_file
-from scriba.utils.time import now_utc
+from scriba.utils.time import format_clock, now_utc
 
 log = get_logger("pipeline")
 
@@ -58,6 +58,7 @@ class JobResult:
     audio: AudioInfo
     processing_seconds: float
     warnings: list[str] = field(default_factory=list)
+    quality: list[dict] = field(default_factory=list)
 
     @property
     def rtf(self) -> float | None:
@@ -210,10 +211,18 @@ class TranscriptionService:
             warnings.append("warn:resumed")
         raw = self.engine.transcribe(asr_input, language=asr.language, context=asr.context,
                                      return_timestamps=timestamps, align_batch=asr.align_batch_size or None,
+                                     chunk_seconds=asr.chunk_seconds,
                                      on_event=tracker.on_event, cancel=self._cancel, resume=resumed,
                                      save=store.save)
         for note in raw.notes:
             warnings.append(note)
+        quality = list(raw.issues)
+        job.record.quality_issues = quality
+        if quality:
+            warnings.append("warn:quality_issues")
+            for issue in quality:
+                log.warning("Check %s-%s: %s (%s)", format_clock(issue["start"]), format_clock(issue["end"]),
+                            issue["kind"], issue["action"])
         tracker.finish()
         transcribe_seconds = tracker.snapshot()["elapsed_seconds"]
         if raw.completed and not resumed:
@@ -247,6 +256,7 @@ class TranscriptionService:
             export=settings.export,
             metadata=self._metadata(settings, model_info, audio_path, job),
         )
+        transcript.metadata["quality_issues"] = quality
         if timestamps and not transcript.has_timestamps and transcript.text:
             warnings.append("Forced aligner returned no timestamps")
 
@@ -270,6 +280,9 @@ class TranscriptionService:
                     max_seconds=settings.export.max_segment_seconds,
                     max_chars=settings.export.max_segment_chars,
                     pause_split=settings.export.pause_split_seconds,
+                    min_turn=settings.diarization.min_turn_seconds,
+                    min_run=settings.diarization.min_speaker_run_seconds,
+                    majority=settings.diarization.sentence_majority,
                 )
                 write_json(job.path("speakers.json"), {s: s for s in transcript.speakers})
                 job.step("diarization", StepStatus.COMPLETED)
@@ -293,7 +306,7 @@ class TranscriptionService:
         job.step("export", StepStatus.COMPLETED)
 
         return JobResult(job_id=job.id, job_dir=job.dir, transcript=transcript, files=files,
-                         audio=info, processing_seconds=0.0, warnings=warnings)
+                         audio=info, processing_seconds=0.0, warnings=warnings, quality=quality)
 
     @staticmethod
     def _metadata(settings: ScribaSettings, model_info, audio_path: Path, job: Job) -> dict:

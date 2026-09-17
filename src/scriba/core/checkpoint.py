@@ -29,7 +29,7 @@ def fingerprint(*, sha256: str, settings: Any) -> dict[str, Any]:
     """Only what changes chunk boundaries or chunk results; batch sizes are deliberately excluded."""
     asr = settings.asr
     return {
-        "version": 1,
+        "version": 2,  # 2: chunks are checked and repaired for repetition loops
         "sha256": sha256,
         "model": asr.model,
         "aligner": asr.forced_aligner.model if asr.timestamps_active else None,
@@ -37,6 +37,7 @@ def fingerprint(*, sha256: str, settings: Any) -> dict[str, Any]:
         "language": asr.language,
         "context": hashlib.sha256((asr.context or "").encode("utf-8")).hexdigest(),
         "max_new_tokens": asr.max_new_tokens,
+        "chunk_seconds": asr.chunk_seconds,
         "normalize": settings.audio.normalize,
         "sample_rate": settings.audio.sample_rate,
     }

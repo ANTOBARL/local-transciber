@@ -105,6 +105,14 @@ export type Optimization = {
   env_path: string | null;
 };
 
+export type QualityIssue = {
+  kind: "repetition" | "sparse";
+  action: "redecoded" | "collapsed" | "kept";
+  start: number;
+  end: number;
+  words_removed: number;
+};
+
 export type TaskStatus = {
   id: string;
   kind?: "transcribe" | "optimize";
@@ -127,6 +135,7 @@ export type TaskStatus = {
   files?: { format: string; name: string; url: string }[];
   output_folder?: string;
   warnings?: string[];
+  quality?: QualityIssue[];
   speakers?: string[];
   speaker_names?: Record<string, string>;
 };

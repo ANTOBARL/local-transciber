@@ -27,6 +27,7 @@ asr:
   max_inference_batch_size: 32
   align_batch_size: 0            # 0 = automatic (half of the ASR batch)
   max_new_tokens: 4096
+  chunk_seconds: 30             # length of the audio pieces sent to the model (5-180)
 
   return_timestamps: true
 
@@ -46,6 +47,9 @@ diarization:
   num_speakers: null
   min_speakers: null
   max_speakers: null
+  min_turn_seconds: 0.5          # speaker turns shorter than this are ignored (diarization noise)
+  min_speaker_run_seconds: 1.0   # speaker changes shorter than this inside speech are undone
+  sentence_majority: 0.7         # whole sentence to the speaker holding this share of its words (0 = off)
 
 export:
   json: true

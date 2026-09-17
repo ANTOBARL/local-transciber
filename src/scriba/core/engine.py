@@ -16,7 +16,8 @@ from typing import Any
 import numpy as np
 
 from scriba.config import ASRSettings
-from scriba.core.windowed import ChunkResult, EventCallback, WindowedRunner
+from scriba.core.quality import join_chunk_texts
+from scriba.core.windowed import ChunkResult, EventCallback, WindowedRunner, merge_issues
 from scriba.errors import (
     AlignmentError,
     BackendUnavailableError,
@@ -48,6 +49,7 @@ class RawASRResult:
     tail_text: str | None = None
     tail_start: float | None = None
     notes: list[str] = field(default_factory=list)  # e.g. batch reduced after an out-of-memory
+    issues: list[dict] = field(default_factory=list)  # time ranges with quality problems (see windowed)
     asr_batch: int | None = None
     align_batch: int | None = None
 
@@ -249,6 +251,7 @@ class QwenASREngine:
         return_timestamps: bool = True,
         *,
         align_batch: int | None = None,
+        chunk_seconds: float | None = None,
         on_event: EventCallback | None = None,
         cancel: CancelToken | None = None,
         resume: dict[int, ChunkResult] | None = None,
@@ -269,7 +272,8 @@ class QwenASREngine:
             asr_batch = self._model.max_inference_batch_size
             asr_batch = 32 if not asr_batch or asr_batch <= 0 else asr_batch
             runner = WindowedRunner(self._model, asr_batch=asr_batch,
-                                    align_batch=align_batch or max(1, asr_batch // 2))
+                                    align_batch=align_batch or max(1, asr_batch // 2),
+                                    chunk_seconds=chunk_seconds)
             try:
                 wav = normalize_audios(audio)[0]  # mono float32 at 16 kHz, same as qwen-asr
                 chunks, completed, stats = runner.run(
@@ -290,11 +294,13 @@ class QwenASREngine:
         processed = (chunks[-1].offset + chunks[-1].duration) if chunks else 0.0
         return RawASRResult(
             language=merge_languages([c.language for c in chunks]) if chunks else "",
-            text="".join(c.text for c in chunks),  # qwen-asr joins chunk texts the same way
+            # qwen-asr joins chunks with "", which glues words together in space-delimited languages.
+            text=join_chunk_texts(c.text for c in chunks),
             tokens=tokens,
             completed=completed,
             processed_seconds=None if completed else round(processed, 3),
             notes=stats.notes,
+            issues=merge_issues([issue for c in chunks for issue in c.issues]),
             asr_batch=runner.asr_batch,
             align_batch=runner.align_batch,
         )

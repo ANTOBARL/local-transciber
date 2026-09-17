@@ -97,3 +97,4 @@ class JobRecord(BaseModel):
     outputs: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    quality_issues: list[dict[str, Any]] = Field(default_factory=list)  # time ranges worth checking by hand
