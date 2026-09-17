@@ -5,6 +5,7 @@ from __future__ import annotations
 from scriba.config import ExportSettings
 from scriba.core.aligner import align_words, build_segments
 from scriba.core.engine import RawASRResult
+from scriba.core.vocabulary import Glossary
 from scriba.models import Segment, Transcript
 from scriba.utils.time import now_utc
 
@@ -19,13 +20,18 @@ def to_transcript(
     forced_language: str | None,
     export: ExportSettings,
     metadata: dict | None = None,
+    glossary: Glossary | None = None,
 ) -> Transcript:
     text = raw.text.strip()
+    corrections: list[dict] = []
     language = forced_language or raw.language or "unknown"
     covered = duration if raw.completed else (raw.processed_seconds or 0.0)
 
     if raw.tokens is not None and text:
         words = align_words(text, raw.tokens)
+        if glossary:
+            words, corrections = glossary.correct_words(words)
+            text = glossary.correct_text(text)
         segments = build_segments(
             words,
             max_seconds=export.max_segment_seconds,
@@ -34,6 +40,8 @@ def to_transcript(
         )
         has_timestamps = bool(words)
     else:
+        if glossary:
+            text = glossary.correct_text(text)
         segments = [Segment(text=text, start=0.0, end=covered)] if text else []
         has_timestamps = False
 
@@ -55,5 +63,5 @@ def to_transcript(
         completed=raw.completed,
         processed_seconds=None if raw.completed else round(covered, 3),
         segments=segments,
-        metadata=metadata or {},
+        metadata={**(metadata or {}), **({"glossary_corrections": corrections} if corrections else {})},
     )

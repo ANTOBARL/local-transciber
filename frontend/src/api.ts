@@ -1,6 +1,7 @@
 export type Form = {
   language: string;
   context: string;
+  glossary: string;
   timestamps: boolean;
   diarize: boolean;
   num_speakers: number;
@@ -21,6 +22,7 @@ export type Form = {
   batch: number;
   align_batch: number;
   max_tokens: number;
+  chunk_seconds: number | null;
   sample_rate: number;
   channels: number;
   normalize: boolean;

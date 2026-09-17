@@ -21,6 +21,7 @@ BACKEND_CHOICES = ["auto", "transformers", "vllm"]
 class TranscriptionForm(BaseModel):
     language: str | None = "auto"
     context: str = ""
+    glossary: str = ""
     timestamps: bool = True
     diarize: bool = True
     num_speakers: int | None = 0
@@ -44,6 +45,7 @@ class TranscriptionForm(BaseModel):
     batch: int = 32
     align_batch: int = 0
     max_tokens: int = 4096
+    chunk_seconds: float | None = None  # None keeps the configured value
     sample_rate: int = 16000
     channels: int = 1
     normalize: bool = True
@@ -51,7 +53,8 @@ class TranscriptionForm(BaseModel):
     @classmethod
     def from_settings(cls, s: ScribaSettings) -> "TranscriptionForm":
         return cls(
-            language=s.asr.language or "auto", context=s.asr.context, timestamps=s.asr.return_timestamps,
+            language=s.asr.language or "auto", context=s.asr.context, glossary=s.asr.glossary,
+            timestamps=s.asr.return_timestamps, chunk_seconds=s.asr.chunk_seconds,
             diarize=s.diarization.enabled, num_speakers=s.diarization.num_speakers or 0,
             min_speakers=s.diarization.min_speakers or 0, max_speakers=s.diarization.max_speakers or 0,
             formats=s.export.enabled_formats(), output_dir=str(s.app.output_root),
@@ -83,6 +86,7 @@ class TranscriptionForm(BaseModel):
             "asr": {
                 "model": self.model.strip(), "backend": self.backend, "device": self.device.strip(),
                 "dtype": self.dtype, "language": self.language, "context": self.context,
+                "glossary": self.glossary,
                 "gpu_memory_utilization": float(self.gpu_mem), "max_inference_batch_size": int(self.batch),
                 "align_batch_size": int(self.align_batch),
                 "max_new_tokens": int(self.max_tokens), "return_timestamps": self.timestamps,
@@ -93,6 +97,8 @@ class TranscriptionForm(BaseModel):
                             "min_speakers": opt_int(self.min_speakers), "max_speakers": opt_int(self.max_speakers)},
             "export": {fmt: fmt in self.formats for fmt in EXPORT_FORMATS},
         }
+        if self.chunk_seconds:
+            overrides["asr"]["chunk_seconds"] = float(self.chunk_seconds)
         if self.hf_token:
             overrides["diarization"]["hf_token"] = self.hf_token
         return base.with_overrides(overrides)

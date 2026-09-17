@@ -15,7 +15,8 @@ Only qwen-asr's building blocks are used (`split_audio_into_chunks`, `_infer_asr
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,6 +29,31 @@ log = get_logger("windowed")
 
 # Sub-chunk lengths tried, in order, when a chunk's transcript looks broken (only those shorter than it).
 RETRY_SECONDS = (30.0, 10.0)
+
+# Real speech needs about 8 tokens per second. A looping decoder otherwise keeps going until
+# max_new_tokens (4096) while the rest of its batch waits; with this cap a 30 s piece stops at 664.
+TOKENS_PER_SECOND_CAP = 20.0
+MIN_TOKEN_CAP = 64
+
+
+@contextmanager
+def token_budget(model: Any, seconds: float) -> Iterator[None]:
+    """Temporarily lower the model's generation limit to what `seconds` of speech can need."""
+    cap = int(MIN_TOKEN_CAP + TOKENS_PER_SECOND_CAP * seconds)
+    restore: list[tuple[Any, str, int]] = []
+    for holder, name in ((model, "max_new_tokens"), (getattr(model, "sampling_params", None), "max_tokens")):
+        value = getattr(holder, name, None)
+        if isinstance(value, int) and value > cap:
+            try:
+                setattr(holder, name, cap)
+            except Exception:  # immutable backend object: keep its own limit
+                continue
+            restore.append((holder, name, value))
+    try:
+        yield
+    finally:
+        for holder, name, value in restore:
+            setattr(holder, name, value)
 
 
 @dataclass
@@ -198,8 +224,9 @@ class WindowedRunner:
         # ---- ASR
         t0 = time.perf_counter()
         try:
-            raw = self.model._infer_asr([context or ""] * len(indexes), [wavs[i] for i in indexes],
-                                        [forced] * len(indexes))
+            with token_budget(self.model, max(plan.durations[i] for i in indexes)):
+                raw = self.model._infer_asr([context or ""] * len(indexes), [wavs[i] for i in indexes],
+                                            [forced] * len(indexes))
         except Exception as exc:
             self._maybe_shrink(exc, "asr", stats)
             raise
@@ -305,7 +332,9 @@ class WindowedRunner:
     def _decode_pieces(self, pieces, forced, context) -> list[str]:
         from qwen_asr.inference.utils import parse_asr_output
 
-        raw = self.model._infer_asr([context or ""] * len(pieces), [p[0] for p in pieces], [forced] * len(pieces))
+        with token_budget(self.model, max(p[2] for p in pieces)):
+            raw = self.model._infer_asr([context or ""] * len(pieces), [p[0] for p in pieces],
+                                        [forced] * len(pieces))
         return [parse_asr_output(out, user_language=forced)[1] for out in raw]
 
     def _maybe_shrink(self, exc: BaseException, phase: str, stats: WindowStats) -> None:

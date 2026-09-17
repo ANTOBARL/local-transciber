@@ -153,6 +153,36 @@ def test_pauses_spanning_chunks_are_reported_once():
     ]
 
 
+def test_generation_limit_follows_audio_length(monkeypatch):
+    from types import SimpleNamespace
+
+    from scriba.core.windowed import token_budget
+
+    seen = []
+
+    class Limited:
+        forced_aligner = None
+        max_new_tokens = 4096
+        sampling_params = SimpleNamespace(max_tokens=4096)
+
+        def _infer_asr(self, contexts, wavs, languages):
+            seen.append((self.max_new_tokens, self.sampling_params.max_tokens))
+            return [" ".join(f"parola{i}" for i in range(60)) for _ in wavs]
+
+    def split(wav, timestamps, max_seconds=None):
+        return [np.zeros(16000, dtype=np.float32)] * 2, WindowPlan(2, 0, [0.0, 30.0], [30.0, 25.0])
+
+    monkeypatch.setattr(WindowedRunner, "split", staticmethod(split))
+    model = Limited()
+    WindowedRunner(model, asr_batch=2, align_batch=2).run(np.zeros(10), language="Italian", context="",
+                                                          timestamps=False)
+    assert seen == [(664, 664)]
+    assert (model.max_new_tokens, model.sampling_params.max_tokens) == (4096, 4096)  # restored
+    small = SimpleNamespace(max_new_tokens=200)
+    with token_budget(small, 180):
+        assert small.max_new_tokens == 200  # never raised
+
+
 def test_chunk_issues_survive_checkpoints():
     from scriba.core.windowed import ChunkResult
 

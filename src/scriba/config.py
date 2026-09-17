@@ -51,7 +51,8 @@ class ASRSettings(BaseModel):
     dtype: DType = "auto"
 
     language: str | None = "Italian"
-    context: str = ""
+    context: str = ""   # sent with every audio chunk: keep it short (see core/vocabulary.py)
+    glossary: str = ""  # one term per line; used only to correct the transcript, never sent to the model
 
     gpu_memory_utilization: float = Field(0.70, gt=0.0, le=1.0)
     max_inference_batch_size: int = Field(32, ge=-1)
@@ -65,6 +66,20 @@ class ASRSettings(BaseModel):
     forced_aligner: ForcedAlignerSettings = ForcedAlignerSettings()
 
     backend_kwargs: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("context", mode="after")
+    @classmethod
+    def _normalize_context(cls, v: str) -> str:
+        from scriba.core.vocabulary import normalize_context
+
+        return normalize_context(v)
+
+    @field_validator("glossary", mode="after")
+    @classmethod
+    def _normalize_glossary(cls, v: str) -> str:
+        from scriba.core.vocabulary import normalize_glossary
+
+        return normalize_glossary(v)
 
     @field_validator("language", mode="before")
     @classmethod

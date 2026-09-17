@@ -28,6 +28,7 @@ asr:
   align_batch_size: 0            # 0 = automatic (half of the ASR batch)
   max_new_tokens: 4096
   chunk_seconds: 30             # length of the audio pieces sent to the model (5-180)
+  glossary: ""                  # proper names, one per line: fixes near-miss spellings after transcription
 
   return_timestamps: true
 

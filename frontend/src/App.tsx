@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  BookOpen,
   Braces,
   Captions,
   FileType,
@@ -46,6 +47,12 @@ const FORMATS: Record<string, { label: string; icon: LucideIcon }> = {
   docx: { label: "Word", icon: FileType },
 };
 const formatLabel = (fmt: string) => FORMATS[fmt]?.label ?? fmt;
+// Keep in sync with core/vocabulary.py: the context is re-read with every audio piece.
+const CONTEXT_WARN_CHARS = 1000;
+const contextSlowdown = (chars: number, chunkSeconds: number) => {
+  const base = chunkSeconds * 13 + 40;
+  return (base + chars / 3.5) / base;
+};
 const LANG_KEY = "scriba_ui_lang";
 
 type SettingsTab = "output" | "model" | "performance" | "optimize";
@@ -159,6 +166,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const contextInput = useRef<HTMLInputElement>(null);
+  const glossaryInput = useRef<HTMLInputElement>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
@@ -187,6 +195,11 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
   const loadContext = async (file: File | undefined) => {
     if (file) set("context", (await file.text()).trim());
   };
+  const loadGlossary = async (file: File | undefined) => {
+    if (file) set("glossary", (await file.text()).trim());
+  };
+  const contextChars = form.context.trim().length;
+  const contextFactor = contextSlowdown(contextChars, form.chunk_seconds ?? 30);
 
   // Follow the queue: when the job being watched finishes, show the next one. Queued jobs count too,
   // otherwise a short job that goes from queued to done between two polls would never be shown.
@@ -424,16 +437,44 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
             <label className="field">
               <span className="label">{t("context")}</span>
               <textarea
-                rows={4}
+                rows={3}
                 value={form.context}
                 placeholder={t("context_placeholder")}
                 onChange={(e) => set("context", e.target.value)}
               />
             </label>
-            <div className="row end">
+            <div className="row field-foot">
+              <span className={`small grow field-hint ${contextChars > CONTEXT_WARN_CHARS ? "warn-text" : "muted"}`}>
+                <span>
+                  {contextChars > CONTEXT_WARN_CHARS && <AlertTriangle size={13} className="inline-icon" />}
+                  {t(contextChars > CONTEXT_WARN_CHARS ? "context_long_hint" : "context_hint")}
+                </span>
+                {contextChars > 0 && (
+                  <span className="mono">
+                    {t("context_size").replace("{chars}", String(contextChars)).replace("{factor}", contextFactor.toFixed(1))}
+                  </span>
+                )}
+              </span>
               <input ref={contextInput} type="file" hidden accept=".txt,.md" onChange={(e) => loadContext(e.target.files?.[0])} />
               <button className="btn secondary sm" onClick={() => contextInput.current?.click()}>
                 <FileText size={15} /> {t("load_context")}
+              </button>
+            </div>
+
+            <label className="field">
+              <span className="label">{t("glossary")}</span>
+              <textarea
+                rows={3}
+                value={form.glossary}
+                placeholder={t("glossary_placeholder")}
+                onChange={(e) => set("glossary", e.target.value)}
+              />
+            </label>
+            <div className="row field-foot">
+              <span className="small grow muted">{t("glossary_hint")}</span>
+              <input ref={glossaryInput} type="file" hidden accept=".txt,.md,.csv" onChange={(e) => loadGlossary(e.target.files?.[0])} />
+              <button className="btn secondary sm" onClick={() => glossaryInput.current?.click()}>
+                <BookOpen size={15} /> {t("load_glossary")}
               </button>
             </div>
 
@@ -587,6 +628,7 @@ function Workspace({ config, i18n, lang, setLang, form, setForm, t }: WorkspaceP
                     <div className="row two">
                       {numberField("batch", t("batch"), 1, -1)}
                       {numberField("max_tokens", t("max_tokens"), 1, 1)}
+                      {numberField("chunk_seconds", t("chunk_seconds"), 5, 5, 180)}
                       {numberField("align_batch", t("align_batch"), 1, 0)}
                     </div>
                     <div className="row two">

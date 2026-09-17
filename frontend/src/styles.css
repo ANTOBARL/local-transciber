@@ -110,6 +110,11 @@ body {
 .stack { display: flex; flex-direction: column; gap: 0.8rem; }
 .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; margin-top: -0.4rem; }
+.row.field-foot { align-items: flex-start; flex-wrap: nowrap; margin-top: -0.4rem; }
+.row.field-foot .btn { flex: none; }
+.warn-text { color: var(--warn); }
+.field-hint { display: flex; flex-direction: column; gap: 0.15rem; }
+.inline-icon { vertical-align: -2px; margin-right: 0.3rem; }
 .row.two { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
 .row.three { display: grid; grid-template-columns: repeat(3, 1fr); align-items: end; }
 

@@ -61,15 +61,21 @@ def _fail(exc: Exception) -> None:
 def _transcribe_options(
     config, language, output, timestamps, context, context_file, backend, model, aligner_model,
     device, diarize, num_speakers, min_speakers, max_speakers, formats, batch_size, gpu_memory,
-    max_new_tokens, keep_audio, sets,
+    max_new_tokens, keep_audio, sets, glossary_file=None,
 ) -> ScribaSettings:
     if context_file is not None:
         from scriba.utils.paths import read_text_file
 
         file_ctx = read_text_file(context_file)
         context = f"{context}\n\n{file_ctx}".strip() if context else file_ctx
+    glossary = None
+    if glossary_file is not None:
+        from scriba.utils.paths import read_text_file
+
+        glossary = read_text_file(glossary_file)
     flat: dict[str, Any] = {
         "asr.language": language,
+        "asr.glossary": glossary,
         "app.output_root": str(output) if output else None,
         "asr.return_timestamps": timestamps,
         "asr.context": context,
@@ -102,6 +108,9 @@ def transcribe(
     timestamps: Annotated[Optional[bool], typer.Option("--timestamps/--no-timestamps")] = None,
     context: Annotated[Optional[str], typer.Option("--context", help="Context / vocabulary prompt.")] = None,
     context_file: Annotated[Optional[Path], typer.Option("--context-file", exists=True, dir_okay=False)] = None,
+    glossary_file: Annotated[Optional[Path], typer.Option(
+        "--glossary-file", exists=True, dir_okay=False,
+        help="Proper names, one per line: near-miss spellings are corrected after transcription.")] = None,
     backend: Annotated[Optional[str], typer.Option("--backend", help="auto | transformers | vllm")] = None,
     model: Annotated[Optional[str], typer.Option("--model")] = None,
     aligner_model: Annotated[Optional[str], typer.Option("--aligner-model")] = None,
@@ -127,7 +136,7 @@ def transcribe(
         settings = _transcribe_options(
             config, language, output, timestamps, context, context_file, backend, model, aligner_model,
             device, diarize, num_speakers, min_speakers, max_speakers, formats, batch_size, gpu_memory,
-            max_new_tokens, keep_audio, sets,
+            max_new_tokens, keep_audio, sets, glossary_file,
         )
     except Exception as exc:
         _fail(exc)

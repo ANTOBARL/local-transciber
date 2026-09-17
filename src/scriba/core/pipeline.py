@@ -24,6 +24,7 @@ from scriba.core.jobs import Job, write_json
 from scriba.core.progress import ThroughputHistory, TranscriptionProgress, real_speed_key
 from scriba.core.speakers import assign_speakers, rename_speakers
 from scriba.core.transcriber import to_transcript
+from scriba.core.vocabulary import CONTEXT_WARN_CHARS, Glossary, context_slowdown
 from scriba.errors import DiarizationError, ScribaError
 from scriba.exporters import export_all, load_transcript
 from scriba.models import JobStatus, StepStatus, Transcript
@@ -204,6 +205,11 @@ class TranscriptionService:
         self.progress = tracker
         set_status(JobStatus.TRANSCRIBING,
                    "Transcribing and generating timestamps..." if timestamps else None)
+        if len(asr.context) > CONTEXT_WARN_CHARS:
+            log.warning("Context is %d characters: every chunk re-reads it (about x%.1f slower). "
+                        "Move long term lists to the glossary.", len(asr.context),
+                        context_slowdown(len(asr.context), asr.chunk_seconds))
+            warnings.append("warn:context_long")
         store.init()
         resumed = store.load()
         if resumed:
@@ -255,7 +261,12 @@ class TranscriptionService:
             forced_language=asr.language,
             export=settings.export,
             metadata=self._metadata(settings, model_info, audio_path, job),
+            glossary=Glossary(asr.glossary) if asr.glossary else None,
         )
+        corrections = transcript.metadata.get("glossary_corrections") or []
+        if corrections:
+            warnings.append("warn:glossary_applied")
+            log.info("Glossary: %s", ", ".join(f"{c['from']} -> {c['to']} (x{c['count']})" for c in corrections))
         transcript.metadata["quality_issues"] = quality
         if timestamps and not transcript.has_timestamps and transcript.text:
             warnings.append("Forced aligner returned no timestamps")

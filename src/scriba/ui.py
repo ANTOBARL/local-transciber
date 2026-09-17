@@ -68,7 +68,7 @@ CSS = """
 @media (max-width: 560px) {.scriba-tiles {grid-template-columns: 1fr}}
 #scriba-apply {font-weight: 800; font-size: 1.1rem; min-height: 3.2rem; margin-top: .8rem}
 #scriba-transcribe {font-weight: 800; letter-spacing: .1em; font-size: 1.1rem; min-height: 3.2rem}
-#scriba-context-btn {align-self: flex-end; max-width: 13rem}
+#scriba-context-btn, #scriba-glossary-btn {align-self: flex-end; max-width: 13rem}
 .scriba-hint {opacity: .65; font-size: .9rem}
 
 .scriba-status {display: flex; align-items: center; gap: .6rem; font-size: 1rem; min-height: 2rem}
@@ -384,6 +384,10 @@ def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, 
                                          placeholder=t(L, "context_placeholder"))
                     context_btn = gr.UploadButton(t(L, "load_context"), file_types=[".txt", ".md"], size="sm",
                                                   variant="secondary", elem_id="scriba-context-btn")
+                    glossary = gr.Textbox(label=t(L, "glossary"), lines=3, max_lines=12, value=asr.glossary,
+                                          placeholder=t(L, "glossary_placeholder"), info=t(L, "glossary_hint"))
+                    glossary_btn = gr.UploadButton(t(L, "load_glossary"), file_types=[".txt", ".md", ".csv"],
+                                                   size="sm", variant="secondary", elem_id="scriba-glossary-btn")
                     timestamps = gr.Checkbox(label=t(L, "timestamps"), info=t(L, "timestamps_hint"),
                                              value=asr.return_timestamps, elem_classes="scriba-toggle")
                     diarize = gr.Checkbox(label=t(L, "diarize"), info=t(L, "diarize_hint"),
@@ -486,6 +490,9 @@ def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, 
                 gr.Dropdown(label=t(lang, "language"), choices=language_choices(lang, SUPPORTED_LANGUAGES)),
                 gr.Textbox(label=t(lang, "context"), placeholder=t(lang, "context_placeholder")),
                 gr.UploadButton(label=t(lang, "load_context")),
+                gr.Textbox(label=t(lang, "glossary"), placeholder=t(lang, "glossary_placeholder"),
+                           info=t(lang, "glossary_hint")),
+                gr.UploadButton(label=t(lang, "load_glossary")),
                 gr.Checkbox(label=t(lang, "timestamps"), info=t(lang, "timestamps_hint")),
                 gr.Checkbox(label=t(lang, "diarize"), info=t(lang, "diarize_hint")),
                 gr.Number(label=t(lang, "num_speakers")),
@@ -536,7 +543,7 @@ def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, 
             ]
 
         relabel_outputs = [
-            lang_state, title, audio_in, language, context, context_btn, timestamps, diarize, num_speakers,
+            lang_state, title, audio_in, language, context, context_btn, glossary, glossary_btn, timestamps, diarize, num_speakers,
             min_speakers, max_speakers, formats, run_btn, stop_btn, acc_settings, tab_output, output_dir, subfolder,
             keep_audio, hf_token, tab_model, model, aligner_model, backend, device, dtype, backend_kwargs,
             unload_btn, tab_perf, gpu_mem, batch, max_tokens, align_batch, sample_rate, channels, normalize,
@@ -573,13 +580,15 @@ def build_app(settings: ScribaSettings | SettingsProvider, service: Any = None, 
             return read_text_file(path)
 
         context_btn.upload(load_context, inputs=[context_btn, context], outputs=context)
+        glossary_btn.upload(load_context, inputs=[glossary_btn, glossary], outputs=glossary)
 
         def build_settings(values: dict[str, Any]) -> ScribaSettings:
             values = {**values, "formats": values["formats"] or [], "output_dir": values["output_dir"] or str(a.output_root)}
             return TranscriptionForm(**values).to_settings(current())
 
         inputs = dict(
-            output_dir=output_dir, subfolder=subfolder, language=language, context=context, timestamps=timestamps,
+            output_dir=output_dir, subfolder=subfolder, language=language, context=context, glossary=glossary,
+            timestamps=timestamps,
             diarize=diarize, num_speakers=num_speakers, min_speakers=min_speakers, max_speakers=max_speakers,
             hf_token=hf_token, formats=formats, model=model, aligner_model=aligner_model, backend=backend,
             device=device, dtype=dtype, gpu_mem=gpu_mem, batch=batch, max_tokens=max_tokens, align_batch=align_batch, normalize=normalize,
