@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from scriba.core.quality import SpeechRate, check_text, collapse_loops, join_chunk_texts
+from scriba.core.quality import SpeechRate, check_text, collapse_loops, join_chunk_texts, strip_context_echo
 from scriba.utils.logging import get_logger
 
 log = get_logger("windowed")
@@ -230,6 +230,9 @@ class WindowedRunner:
         except Exception as exc:
             self._maybe_shrink(exc, "asr", stats)
             raise
+        # Only the regular decode counts as speed: repairs are occasional and would distort the ETA.
+        stats.asr_seconds += time.perf_counter() - t0
+        stats.asr_done += len(indexes)
         parsed = [parse_asr_output(out, user_language=forced) for out in raw]
         issues: dict[int, list[dict[str, Any]]] = {}
         for (_, text), i in zip(parsed, indexes):
@@ -238,8 +241,6 @@ class WindowedRunner:
         for pos, i in enumerate(indexes):
             parsed[pos], issues[i] = self._repair(wavs[i], plan.offsets[i], plan.durations[i], parsed[pos],
                                                   forced, context, reference)
-        stats.asr_seconds += time.perf_counter() - t0  # re-decoding is ASR work too
-        stats.asr_done += len(indexes)
         self._emit(on_event, "asr", plan, stats)
 
         # ---- alignment, in its own (smaller) batches
@@ -275,6 +276,28 @@ class WindowedRunner:
     # ------------------------------------------------------------------ quality repair
     def _repair(self, wav, offset: float, duration: float, parsed: tuple[str, str], forced, context,
                 reference: float | None = None) -> tuple[tuple[str, str], list[dict[str, Any]]]:
+        """Undo a recited context first (re-decoding without it), then fix loops and dropped speech."""
+        lang, text = parsed
+        issues: list[dict[str, Any]] = []
+        if context:
+            _, echoed = strip_context_echo(text, context)
+            if echoed:
+                log.warning("Chunk at %.0fs: the model recited the context (%d words), re-decoding without it",
+                            offset, echoed)
+                try:
+                    text = self._decode_pieces([(wav, 0.0, duration)], forced, "")[0]
+                except Exception as exc:  # best effort: drop the recited words
+                    if _is_oom(exc):
+                        _free_cuda()
+                    log.warning("Re-decoding the chunk at %.0fs failed: %s", offset, exc)
+                    text = strip_context_echo(text, context)[0]
+                context = ""
+                issues.append(_issue("context", offset, duration, "redecoded", echoed))
+        repaired, more = self._repair_text(wav, offset, duration, (lang, text), forced, context, reference)
+        return repaired, issues + more
+
+    def _repair_text(self, wav, offset: float, duration: float, parsed: tuple[str, str], forced, context,
+                     reference: float | None = None) -> tuple[tuple[str, str], list[dict[str, Any]]]:
         """Re-decode a chunk whose transcript loops (or is nearly empty) in shorter pieces.
 
         Shorter inputs rarely loop, and a loop that still happens only costs its own piece. Pieces
@@ -335,7 +358,14 @@ class WindowedRunner:
         with token_budget(self.model, max(p[2] for p in pieces)):
             raw = self.model._infer_asr([context or ""] * len(pieces), [p[0] for p in pieces],
                                         [forced] * len(pieces))
-        return [parse_asr_output(out, user_language=forced)[1] for out in raw]
+        texts = [parse_asr_output(out, user_language=forced)[1] for out in raw]
+        # Short, quiet pieces are where the model most often recites the context: redo those without it.
+        echoed = [k for k, text in enumerate(texts) if context and strip_context_echo(text, context)[1]]
+        if echoed:
+            again = self._decode_pieces([pieces[k] for k in echoed], forced, "")
+            for k, text in zip(echoed, again):
+                texts[k] = text
+        return texts
 
     def _maybe_shrink(self, exc: BaseException, phase: str, stats: WindowStats) -> None:
         """On out-of-memory, halve the batch of the failing phase and ask for a retry."""
@@ -384,6 +414,9 @@ def merge_issues(issues: list[dict[str, Any]], gap: float = 1.0) -> list[dict[st
 
 
 def _issue(kind: str, start: float, duration: float, action: str, words_removed: int = 0) -> dict[str, Any]:
-    """A time range worth checking by hand. kind: repetition | sparse; action: redecoded | collapsed | kept."""
+    """A time range worth checking by hand.
+
+    kind: repetition | sparse | context; action: redecoded | collapsed | kept.
+    """
     return {"kind": kind, "start": round(start, 2), "end": round(start + duration, 2), "action": action,
             "words_removed": words_removed}

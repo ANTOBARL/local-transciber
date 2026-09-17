@@ -108,7 +108,7 @@ export type Optimization = {
 };
 
 export type QualityIssue = {
-  kind: "repetition" | "sparse";
+  kind: "repetition" | "sparse" | "context";
   action: "redecoded" | "collapsed" | "kept";
   start: number;
   end: number;

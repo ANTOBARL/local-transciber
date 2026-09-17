@@ -148,6 +148,6 @@ def test_exports_contain_interruption_note():
 
 def test_job_folder_uses_audio_name_and_timestamp():
     when = datetime(2026, 9, 15, 14, 23, 1)
-    assert new_job_id(when, "D:/rec/Seminario FII 14-09-2026 parte 1.m4a") == "Seminario_FII_14-09-2026_parte_1_20260915_142301"
+    assert new_job_id(when, "D:/rec/Convegno ABC 01-09-2026 parte 1.m4a") == "Convegno_ABC_01-09-2026_parte_1_20260915_142301"
     assert safe_name("../../etc/passwd") == "etcpasswd"
     assert safe_name("   ") == "audio"

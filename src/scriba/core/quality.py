@@ -6,6 +6,9 @@ lost for that chunk. qwen-asr's own fixer only looks at character patterns up to
 longer phrases slip through. The checks here work on words and are meant for space-delimited
 languages.
 
+On unclear audio (chatter before an event, silence) the model may also recite the context prompt
+instead of transcribing; such text is recognised by long word sequences copied from the context.
+
 The decoder can also stop early: a 3-minute chunk comes back with a handful of words and the rest of
 the speech is silently dropped. Such chunks are recognised by their speech rate, in absolute terms and
 compared with the rest of the recording.
@@ -26,6 +29,8 @@ SPARSE_WORDS_PER_SECOND = 0.3
 RELATIVE_SPARSE = 0.5         # below half the recording's typical rate, speech was probably dropped
 MIN_SPARSE_SECONDS = 20.0
 MIN_REFERENCE_CHUNKS = 3
+ECHO_NGRAM = 4           # words compared at a time with the context
+MIN_ECHO_WORDS = 10      # a speaker quoting a few context words is normal; ten in a row is the prompt
 
 
 def _norm(word: str) -> str:
@@ -135,6 +140,33 @@ class SpeechRate:
         rates = sorted(self._rates)
         mid = len(rates) // 2
         return rates[mid] if len(rates) % 2 else (rates[mid - 1] + rates[mid]) / 2
+
+
+def strip_context_echo(text: str, context: str) -> tuple[str, int]:
+    """Remove runs of at least MIN_ECHO_WORDS words copied from the context. Returns (text, words removed)."""
+    ctx = [w for w in (_norm(w) for w in context.split()) if w]
+    if len(ctx) < ECHO_NGRAM or not text:
+        return text, 0
+    grams = {tuple(ctx[i:i + ECHO_NGRAM]) for i in range(len(ctx) - ECHO_NGRAM + 1)}
+    words = text.split()
+    norm = [_norm(w) for w in words]
+    covered = [False] * len(words)
+    for i in range(len(words) - ECHO_NGRAM + 1):
+        if tuple(norm[i:i + ECHO_NGRAM]) in grams:
+            covered[i:i + ECHO_NGRAM] = [True] * ECHO_NGRAM
+    kept: list[str] = []
+    i = 0
+    while i < len(words):
+        j = i
+        while j < len(words) and covered[j]:
+            j += 1
+        if j - i >= MIN_ECHO_WORDS:
+            i = j
+            continue
+        kept.extend(words[i:max(j, i + 1)])
+        i = max(j, i + 1)
+    removed = len(words) - len(kept)
+    return (" ".join(kept), removed) if removed else (text, 0)
 
 
 def join_chunk_texts(texts: Iterable[str]) -> str:

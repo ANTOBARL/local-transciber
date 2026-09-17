@@ -5,12 +5,12 @@ whole transcription: a 30 s chunk is about 390 tokens, a 12 000-character term l
 meant for a short hint (event, speakers, a few key terms).
 
 The glossary is never sent to the model. After transcription, words that almost match a glossary term
-are replaced by it ("Meditec" -> "MedITech", "Caterina Melio" -> "Caterina Meglio"). The rules are
+are replaced by it ("Neurotec" -> "NeuroTech", "Laura Bianci" -> "Laura Bianchi"). The rules are
 deliberately conservative, so that ordinary words are never rewritten:
 
 - only proper-name terms take part: a capital letter after the first character, or a digit
-  ("San Giovanni Innovation District", "MedITech", "CNR-ITC"); "Campania" or "politica industriale" do not;
-- only text the model already wrote with a capital letter is corrected ("formare" never becomes "ForMare");
+  ("Aurora Science Park", "NeuroTech", "AB-12"); "Piemonte" or "politica industriale" do not;
+- only text the model already wrote with a capital letter is corrected ("provare" never becomes "ProVare");
 - a match never spans punctuation, and must start with the same two letters as the term;
 - approximate matches need a term of at least 7 letters, and a stricter similarity when the number of
   words differs.
@@ -30,7 +30,7 @@ CHARS_PER_TOKEN = 3.5
 AUDIO_TOKENS_PER_SECOND = 13.0
 PROMPT_TOKENS = 40
 
-MIN_TERM_CHARS = 5        # letters and digits; shorter terms (FII, CNR) are too ambiguous
+MIN_TERM_CHARS = 5        # letters and digits; shorter terms (ABC, XYZ) are too ambiguous
 MIN_FUZZY_CHARS = 7       # shorter terms are only matched exactly (ignoring case and spacing)
 SIMILARITY = 0.85
 SIMILARITY_OTHER_SIZE = 0.92  # when the candidate has one word more or less than the term

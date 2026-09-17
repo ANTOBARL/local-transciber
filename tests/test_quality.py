@@ -47,6 +47,19 @@ def test_early_stopped_chunk_is_sparse_compared_with_the_recording():
     assert not check_text(" ".join(f"w{i}" for i in range(250)), 180, rates.reference).sparse
 
 
+CONTEXT = "Convegno sul futuro dell'energia. Temi: idrogeno, eolico, solare, reti intelligenti, accumuli, mobilità elettrica."
+
+
+def test_recited_context_is_removed_but_quotes_are_kept():
+    from scriba.core.quality import strip_context_echo
+
+    echo = "ciao a tutti Convegno sul futuro dell'energia. Temi: idrogeno, eolico, solare, reti intelligenti, accumuli"
+    assert strip_context_echo(echo, CONTEXT) == ("ciao a tutti", 11)
+    quote = "oggi parliamo di idrogeno, eolico, solare e poi di altro"
+    assert strip_context_echo(quote, CONTEXT) == (quote, 0)
+    assert strip_context_echo(echo, "") == (echo, 0)
+
+
 def test_chunk_texts_are_joined_with_spaces_except_cjk():
     assert join_chunk_texts(["non hanno bisogno di", "provare.", ""]) == "non hanno bisogno di provare."
     assert join_chunk_texts(["你好。", "世界"]) == "你好。世界"
@@ -181,6 +194,57 @@ def test_generation_limit_follows_audio_length(monkeypatch):
     small = SimpleNamespace(max_new_tokens=200)
     with token_budget(small, 180):
         assert small.max_new_tokens == 200  # never raised
+
+
+def test_chunk_reciting_the_context_is_decoded_again_without_it(monkeypatch):
+    calls = []
+    speech = " ".join(f"parola{i}" for i in range(60))
+
+    class Reciting:
+        forced_aligner = None
+
+        def _infer_asr(self, contexts, wavs, languages):
+            calls.append(contexts[0])
+            return [(CONTEXT + " ") * 3 if contexts[0] else speech for _ in wavs]
+
+    def split(wav, timestamps, max_seconds=None):
+        return [np.zeros(16000, dtype=np.float32)], WindowPlan(1, 0, [10.0], [30.0])
+
+    monkeypatch.setattr(WindowedRunner, "split", staticmethod(split))
+    chunks, _, stats = WindowedRunner(Reciting(), asr_batch=2, align_batch=2).run(
+        np.zeros(10), language="Italian", context=CONTEXT, timestamps=False)
+    assert chunks[0].text == speech
+    assert calls == [CONTEXT, ""]
+    issue, = chunks[0].issues
+    assert (issue["kind"], issue["action"], issue["start"], issue["end"]) == ("context", "redecoded", 10.0, 40.0)
+
+
+def test_pieces_reciting_the_context_are_decoded_again_without_it(monkeypatch):
+    calls = []
+
+    class QuietStart:
+        forced_aligner = None
+
+        def _infer_asr(self, contexts, wavs, languages):
+            calls.append((contexts[0], len(wavs)))
+            if len(wavs[0]) > 16000:  # the whole chunk: almost nothing recognised
+                return ["ciao" for _ in wavs]
+            if contexts[0]:  # pieces with context: the second one recites it
+                return ["prima parte del discorso" if int(w[0]) == 0 else CONTEXT for w in wavs]
+            return ["seconda parte del discorso" for _ in wavs]
+
+    def split(wav, timestamps, max_seconds=None):
+        return [np.zeros(2 * 16000, dtype=np.float32)], WindowPlan(1, 0, [0.0], [30.0])
+
+    def split_sub(wav, seconds):
+        return [(np.full(16000, float(i), dtype=np.float32), i * 15.0, 15.0) for i in range(2)]
+
+    monkeypatch.setattr(WindowedRunner, "split", staticmethod(split))
+    monkeypatch.setattr(WindowedRunner, "split_sub", staticmethod(split_sub))
+    chunks, _, _ = WindowedRunner(QuietStart(), asr_batch=2, align_batch=2).run(
+        np.zeros(10), language="Italian", context=CONTEXT, timestamps=False)
+    assert chunks[0].text == "prima parte del discorso seconda parte del discorso"
+    assert calls == [(CONTEXT, 1), (CONTEXT, 2), ("", 1)]
 
 
 def test_chunk_issues_survive_checkpoints():
